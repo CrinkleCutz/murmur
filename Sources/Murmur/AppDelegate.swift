@@ -67,7 +67,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     @Published var sherpaModel: String = Settings.sherpaModel
     @Published var sherpaReady = false
     @Published var voiceProfile: VoiceProfile? = VoiceProfileStore.load()
-    @Published var appearance: AppearanceSetting = Settings.appearance
+    // Dark theme is shelved (Settings' own picker for this is gone too) —
+    // pinned to `.light` here rather than `Settings.appearance` so anyone
+    // who'd previously picked Dark/System still launches into light, not
+    // whatever they last chose. `AppearanceSetting`/`Settings.appearance`
+    // are left in place for when dark mode is revisited.
+    @Published var appearance: AppearanceSetting = .light
     private(set) lazy var transformManager = TransformManager(engine: rewriteEngine)
 
     /// Extra status line shown in the top bar while a transform runs.
@@ -139,12 +144,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         FontLoader.registerManrope()
-        // `appearance`'s stored value only ever reached `NSApp.appearance`
-        // from `setAppearance`, i.e. only once the user re-picked it from
-        // Settings in that session — a fresh launch left `NSApp.appearance`
-        // at its default (follow system) regardless of what "Light"/"Dark"
-        // had been saved. Applying it here, before any window exists, is
-        // what actually makes the persisted choice take effect from launch.
+        // Forces `NSApp.appearance` to `.aqua` before any window exists —
+        // without this, a Mac already in Dark Mode would still hand the
+        // app a dark `effectiveAppearance` by default, `appearance`'s
+        // pinned `.light` above notwithstanding.
         setAppearance(appearance)
         entries = history.entries
         setUpStatusItem()

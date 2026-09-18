@@ -34,6 +34,9 @@
   lower-quality model than whichever engine you've actually selected,
   often late or wrong before the real transcript replaced it — down to a
   simpler icon + waveform + status-label footer.
+- Settings' General card no longer has a Light/Dark/System picker — dark
+  mode isn't reliable enough to ship yet, so appearance is pinned to light
+  for now.
 
 ## v2.1.0 — 2026-09-10
 

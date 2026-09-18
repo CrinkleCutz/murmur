@@ -101,8 +101,7 @@ struct SettingsPage: View {
 
     private var tiles: some View {
         VStack(spacing: 12) {
-            tile(id: 0, icon: .settings, title: "General", summary: "Theme · Version \(appVersion)") {
-                appearanceSection
+            tile(id: 0, icon: .settings, title: "General", summary: "Version \(appVersion)") {
                 softwareSection
             }
             tile(
@@ -228,49 +227,6 @@ struct SettingsPage: View {
             if !isLast {
                 Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
             }
-        }
-    }
-
-    // MARK: Appearance
-
-    private var appearanceSection: some View {
-        fieldRow(label: "Theme", detail: appearanceDetail, isLast: true) {
-            HStack(spacing: 2) {
-                ForEach(AppearanceSetting.allCases) { setting in
-                    Button {
-                        withAnimation(.murmurEase(0.18)) { app.setAppearance(setting) }
-                    } label: {
-                        Text(setting.label)
-                            .font(.manrope(12, setting == app.appearance ? .semibold : .regular))
-                            .foregroundStyle(setting == app.appearance ? .white : Palette.warmInkSoft)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 6)
-                            .background {
-                                if setting == app.appearance {
-                                    Capsule().fill(Palette.sunset)
-                                }
-                            }
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(2)
-            .background(Color.white, in: Capsule())
-            .overlay(Capsule().stroke(Palette.warmRowBorder, lineWidth: 1))
-            .fixedSize()
-        }
-    }
-
-    /// Says what the current choice actually does, rather than restating
-    /// the option's own name back at the reader.
-    private var appearanceDetail: String {
-        switch app.appearance {
-        case .system:
-            return "Follows your Mac — including switching automatically if macOS is set to Auto."
-        case .light:
-            return "Always light, whatever your Mac is set to."
-        case .dark:
-            return "Always dark, whatever your Mac is set to."
         }
     }
 
