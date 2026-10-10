@@ -137,9 +137,13 @@ final class WhisperEngine {
         return pipe
     }
 
+    /// `confidence` is `exp` of the token-weighted mean of every segment's
+    /// `avgLogprob` — the geometric-mean per-token probability, on the same
+    /// 0–1 scale `TranscriptionPlausibility.isPlausible` expects. `nil`
+    /// only when the decode produced no tokens at all.
     func transcribe(
         fileAt url: URL, model: String, localeID: String,
-        biasTerms: [String]) async throws -> String {
+        biasTerms: [String]) async throws -> (text: String, confidence: Float?) {
         let pipe = try await pipeline(model: model)
 
         var options = DecodingOptions()
@@ -169,16 +173,14 @@ final class WhisperEngine {
         }
 
         // Vocabulary biasing: Whisper conditions on a decoder prompt, so
-        // listing the user's terms makes it far likelier to spell them
-        // right. 150, not 60: `biasTerms()` now leads with Murmur's ~110
-        // built-in developer terms before the user's own — a cutoff of 60
-        // let personal terms alone (74 for one real user) push every
-        // built-in term out of the prompt entirely. `tokens.prefix(200)`
-        // below is the real, token-level safety net if this is still too
-        // generous for a given tokenizer.
-        if !biasTerms.isEmpty, let tokenizer = pipe.tokenizer {
-            let prompt = "Vocabulary: "
-                + biasTerms.prefix(150).joined(separator: ", ") + "."
+        // naming the user's terms makes it far likelier to spell them right.
+        // The same one short sentence whisper.cpp gets (`WhisperPrompt`: the
+        // user's own words first, all of them, then Murmur's built-in names)
+        // — the old "Vocabulary: " list of up to 150 terms made whisper.cpp
+        // put commas at pauses and was cut off at random. `tokens.prefix(200)`
+        // below stays as the token-level safety net.
+        if let tokenizer = pipe.tokenizer,
+           let prompt = WhisperPrompt.text(for: biasTerms, personal: LearnedStore.personalTermKeys()) {
             let tokens = tokenizer.encode(text: " " + prompt)
                 .filter { $0 < tokenizer.specialTokens.specialTokenBegin }
             options.promptTokens = Array(tokens.prefix(200))
@@ -202,11 +204,50 @@ final class WhisperEngine {
         // genuine dictations. `HallucinationFilter` (whole-output phrase
         // matching) and `AudioRecorder`'s sustained-signal gate already
         // cover the silence case this was for.
-        return results
-            .flatMap(\.segments)
+        let segments = results.flatMap(\.segments)
+        var text = segments
             .map(\.text)
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // `avgLogprob` is per decode *window* — every segment cut from one
+        // window carries that window's value (see WhisperKit's
+        // `SegmentSeeker`) — so weighting each segment by its token count
+        // counts each window once, in proportion to how much it said,
+        // rather than letting a two-token segment outvote a fifty-token one.
+        // This is the exact number WhisperKit itself compares against
+        // `logProbThreshold` (-1.0, OpenAI's reference value) to decide
+        // whether to retry at a higher temperature, so a result that still
+        // scores below it here has already failed every fallback attempt.
+        //
+        // Not a fix for a *confidently* wrong decode: a hallucinated
+        // sign-off on silence scores as high-confidence too (see the
+        // `noSpeechProb` note above) — that stays `HallucinationFilter`'s
+        // job. This catches the unsure-and-still-wrong case instead.
+        let tokenCount = segments.reduce(0) { $0 + $1.tokens.count }
+        let confidence: Float? = tokenCount == 0 ? nil : {
+            let weightedLogProb = segments.reduce(0.0) {
+                $0 + Double($1.avgLogprob) * Double($1.tokens.count)
+            }
+            return Float(exp(weightedLogProb / Double(tokenCount)))
+        }()
+        // A name the model was unsure of, checked against the user's names — see `UnsureWordFix`. Each token's own
+        // log probability is already in the result, so this costs no extra decoding.
+        if UnsureWordFix.isEnabled, options.language == "en", let tokenizer = pipe.tokenizer {
+            let special = tokenizer.specialTokens.specialTokenBegin
+            let pieces = segments.flatMap { segment in
+                zip(segment.tokens, segment.tokenLogProbs).compactMap { id, logProbs -> (text: String, p: Float)? in
+                    guard id < special, let logProb = logProbs[id] else { return nil }
+                    return (tokenizer.decode(tokens: [id]), exp(logProb))
+                }
+            }
+            if let fixed = UnsureWordFix.fix(text, words: UnsureWordFix.words(fromTokens: pieces), terms: biasTerms) {
+                dictationLog.info("WhisperKit: fixed \(fixed.changes.count) unsure name(s)")
+                NameFixLog.record(fixed.changes, engine: "WhisperKit")
+                text = fixed.text
+            }
+        }
+        return (text, confidence)
     }
 
     /// OpenAI's own reference default — the value most is known about not

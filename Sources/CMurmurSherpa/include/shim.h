@@ -82,6 +82,12 @@ void MurmurSherpaDestroyRecognizer(MurmurSherpaRecognizer recognizer);
 /// lifecycle (an offline stream AND its result each need their own create/
 /// destroy call) behind one call so the Swift side only ever deals with a
 /// string in, a string out.
+/// The same decode, returning sherpa-onnx's whole result as JSON — text, tokens and, where the model gives them, each
+/// token's log probability ("ys_log_probs") — for the unsure-word name fix. Caller frees it with free().
+char *MurmurSherpaTranscribeJSON(
+    MurmurSherpaRecognizer recognizer,
+    const float *samples, int32_t sample_count, int32_t sample_rate);
+
 char *MurmurSherpaTranscribe(
     MurmurSherpaRecognizer recognizer,
     const float *samples, int32_t sample_count, int32_t sample_rate);

@@ -7,6 +7,8 @@ import Foundation
 enum LoggedNotificationKind: String, Codable {
     case appProfileSuggestion
     case updateAvailable
+    /// A name learned from a correction made right after a dictation (`EditLearner`); opens Voice Profile.
+    case learnedFromEdit
 }
 
 struct LoggedNotification: Codable, Identifiable, Equatable {

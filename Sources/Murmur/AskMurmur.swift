@@ -239,8 +239,10 @@ enum AskMurmur {
     ) async throws -> Answer {
         guard !history.isEmpty || !meetings.isEmpty else {
             return Answer(
-                text: "You don't have any dictations or meeting notes yet — dictate " +
-                      "something, or capture a meeting with Notetaker, then ask again.",
+                text: Notetaker.isAvailable
+                    ? "You don't have any dictations or meeting notes yet — dictate " +
+                      "something, or capture a meeting with Notetaker, then ask again."
+                    : "You don't have any dictations yet — dictate something, then ask again.",
                 sources: [])
         }
         // A follow-up like "who owns it?" carries almost no keywords of its

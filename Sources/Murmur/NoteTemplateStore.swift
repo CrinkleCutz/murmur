@@ -25,6 +25,24 @@ struct NoteTemplate: Codable, Identifiable, Equatable {
     /// decoded a `templates.json` written before this field existed.
     var exampleInput: String? = nil
     var exampleOutput: String? = nil
+    /// More phrases that apply it — the built-ins' Latvian ones ("sapulces piezīmes"). Optional for the same decoding
+    /// reason as the example above.
+    var otherTriggers: [String]? = nil
+    /// The parts a template of the user's own asks for, worked out from its description when it was saved
+    /// (`TemplateEngine.planSections`); nil when it isn't laid out in parts.
+    var sections: [TemplateSectionSpec]? = nil
+
+    /// Every phrase that applies it: its own, any extra ones, and for a built-in its Latvian phrase.
+    var triggers: [String] {
+        ([voiceTrigger] + (otherTriggers ?? []) + (isBuiltIn ? Self.latvianTriggers[name] ?? [] : []))
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// The built-ins' Latvian phrases (templates also work for Latvian dictation — `TemplateLanguage`).
+    static let latvianTriggers: [String: [String]] = [
+        "Meeting Notes": ["sapulces piezīmes"], "Summary": ["kopsavilkums"],
+        "Email Draft": ["e-pasta melnraksts", "epasta melnraksts", "e-pasts"], "Task List": ["uzdevumu saraksts"],
+        "Blog Post": ["bloga ieraksts"]]
 
     /// Empty unless both halves of the example are present, so a template
     /// with no example composes into `instructions` unchanged.
@@ -42,88 +60,120 @@ struct NoteTemplate: Codable, Identifiable, Equatable {
             """
     }
 
+    /// The built-ins, rewritten 2026-09-30 for `TemplateEngine` (fields the model fills, laid out by Murmur): each
+    /// says what to keep and why a guess hurts, with one worked example in the finished layout.
     static let builtIns: [NoteTemplate] = [
         NoteTemplate(
             name: "Meeting Notes", icon: "person.2.wave.2",
             instructions: """
-            Turn this transcript into structured meeting notes with clear \
-            sections: Attendees (if named), Key Discussion Points, \
-            Decisions Made, and Action Items (who owns what, if stated). \
-            Use headings and bullet points. Do not invent information that \
-            isn't in the transcript.
+            Turn the dictation into meeting notes. It is the user's own spoken recap, so keep only what they said: \
+            the people named, what was discussed, what was decided, who will do what and by when, and what is still \
+            open. A name, decision or deadline that wasn't said would end up in someone's notes as fact, so leave a \
+            part empty rather than guess.
             """, isBuiltIn: true, voiceTrigger: "meeting notes",
-            // Verified via a true before/after comparison (--edit
-            // --template "Meeting Notes" on a no-attendees/no-decision
-            // input, several runs each way): without this example the
-            // on-device model fabricated an "Attendees" entry from the
-            // phrase "nobody really decided anything" and smeared that
-            // same phrase across Decisions Made and Action Items too, once
-            // even in all three. With it, every run correctly omitted the
-            // sections that didn't apply. A clear, reproducible win, not
-            // an assumed one — contrast Task List below, which is not.
             exampleInput: """
-            Okay so we went over the Q3 roadmap, the API work is going to \
-            slip about two weeks because of the auth rewrite, and we \
-            decided to just push the launch date instead of cutting scope. \
-            Someone needs to update the customer-facing changelog before \
-            we tell anyone.
+            Okay so we went over the Q3 roadmap, the API work is going to slip about two weeks because of the auth \
+            rewrite, and we decided to just push the launch date instead of cutting scope. Someone needs to update \
+            the customer-facing changelog before we tell anyone.
             """,
             exampleOutput: """
-            **Key Discussion Points**
-            - Q3 roadmap review
-            - API work is slipping ~2 weeks due to the auth rewrite
+            Key points
+            - Went over the Q3 roadmap
+            - The API work will slip about two weeks because of the auth rewrite
 
-            **Decisions Made**
-            - Push the launch date rather than cut scope
+            Decisions
+            - Push the launch date instead of cutting scope
 
-            **Action Items**
-            - Update the customer-facing changelog before the delay is announced
+            Action items
+            - Update the customer-facing changelog before telling anyone
             """),
         NoteTemplate(
             name: "Summary", icon: "text.line.first.and.arrowtriangle.forward",
             instructions: """
-            Summarize this transcript into a short, clear paragraph \
-            capturing only the main points. Aim for about a quarter of the \
-            original length. No preamble like "This transcript discusses" —
-            start directly with the content.
-            """, isBuiltIn: true, voiceTrigger: "summarize this"),
+            Summarize the dictation in one short paragraph with only its main points, about a quarter of its length, \
+            in the speaker's own voice (I, we). Start straight with the content, never with "This text discusses", \
+            and keep every number, name and date you use exactly as said.
+            """, isBuiltIn: true, voiceTrigger: "summarize this",
+            exampleInput: """
+            so the plan for the kitchen is we keep the old cabinets but paint them dark green, the new worktop is \
+            oak, the builder can start on the 3rd of March and says it takes about two weeks, and the budget is \
+            4,000 euros including the sink, which is more than we wanted but still okay
+            """,
+            exampleOutput: """
+            We're keeping the old cabinets but painting them dark green, with a new oak worktop. The builder starts \
+            on the 3rd of March for about two weeks, and the budget is 4,000 euros including the sink: more than we \
+            wanted, but okay.
+            """),
         NoteTemplate(
             name: "Email Draft", icon: "envelope",
             instructions: """
-            Rewrite this transcript as a clear, professional email. Infer a \
-            reasonable subject line, a greeting, well-organized body \
-            paragraphs, and a sign-off. Keep the original intent and facts; \
-            don't add claims that weren't said.
-            """, isBuiltIn: true, voiceTrigger: "email draft"),
+            Turn the dictation into an email the user is sending. They say who it is to and what they want to say, \
+            often as "to Sophie, …" or "ask the team whether …": write a short subject and the body in their voice, \
+            addressed to the recipient: "can she ask legal" becomes "Could you ask legal", and "ask the team whether \
+            anyone can cover support on Friday" is written to the team as "Could anyone cover support on Friday?". \
+            Murmur adds the greeting and the sign-off, so the body has neither. Keep every fact, date and number as said.
+            """, isBuiltIn: true, voiceTrigger: "email draft",
+            exampleInput: """
+            to Marco, the photos from Saturday are ready, I'll send the link tonight, can he let me know which ones \
+            he wants printed by Wednesday
+            """,
+            exampleOutput: """
+            Subject: Photos from Saturday
+
+            Hi Marco,
+
+            The photos from Saturday are ready, and I'll send you the link tonight.
+
+            Could you let me know which ones you'd like printed by Wednesday?
+
+            Best,
+            """),
         NoteTemplate(
             name: "Task List", icon: "checklist",
             instructions: """
-            Extract every task, action item, or to-do mentioned in this \
-            transcript into a checklist. One line per task, starting each \
-            with "- [ ] ". Include an owner or deadline in parentheses if \
-            one was mentioned. If nothing task-like is present, say so \
-            plainly instead of inventing tasks.
-            """, isBuiltIn: true, voiceTrigger: "task list"),
-            // Deliberately no worked example here, unlike Meeting Notes
-            // above — tried one (a 3-task input/output pair) and a real
-            // before/after comparison (--edit --template "Task List",
-            // several runs each way, two-task inputs) showed no
-            // improvement: both versions dropped the second task about
-            // as often, and the example version failed to apply any
-            // checklist formatting at all in roughly half its runs, worse
-            // than without it. The underlying two-item drop looks like a
-            // pre-existing limitation of the on-device model on this
-            // template, not something a worked example fixes — shipping
-            // the example anyway would be assuming it helped rather than
-            // having verified that it does.
+            List every task, to-do or action in the dictation, one per item, as a short instruction, with who does \
+            it and when only if the user said so. A story or a description with nothing to do has no tasks: a made-up \
+            task is worse than none.
+            """, isBuiltIn: true, voiceTrigger: "task list",
+            exampleInput: """
+            before the trip I need to renew my passport, ask Tom to water the plants, and pay the electricity bill \
+            by the 20th
+            """,
+            exampleOutput: """
+            - [ ] Renew my passport
+            - [ ] Ask Tom to water the plants
+            - [ ] Pay the electricity bill (by the 20th)
+            """),
         NoteTemplate(
             name: "Blog Post", icon: "doc.richtext",
             instructions: """
-            Turn this transcript into a polished, readable blog-post-style \
-            draft: a short engaging opening, organized body with \
-            subheadings where natural, and a brief closing. Keep the \
-            author's actual points and voice; don't invent new claims.
-            """, isBuiltIn: true, voiceTrigger: "blog post"),
+            Turn the dictation into a blog post draft in the author's voice: a title, an opening paragraph, a section \
+            with a short heading for each point they make, and a brief closing. Build it from their points and their \
+            words, and add no facts, numbers or claims they didn't make.
+            """, isBuiltIn: true, voiceTrigger: "blog post",
+            exampleInput: """
+            why I switched to a standing desk, my back hurt every evening, I raised it in the mornings only at first, \
+            now I stand about half the day, and the surprise was that I focus better in the afternoon
+            """,
+            exampleOutput: """
+            # Why I Switched to a Standing Desk
+
+            My back hurt every evening.
+
+            ## Starting slowly
+
+            At first I only raised the desk in the mornings.
+
+            ## Half the day, standing
+
+            Now I stand about half the day.
+
+            ## The surprise
+
+            I focus better in the afternoon, which I didn't expect.
+
+            If your back is complaining too, start with the mornings.
+            """),
     ]
 }
 
@@ -157,17 +207,18 @@ enum NoteTemplateStore {
     /// similar word ("Email John about...") don't misfire.
     static func matchVoiceTrigger(in text: String) -> (template: NoteTemplate, remainder: String)? {
         for template in all() {
-            let trigger = template.voiceTrigger.trimmingCharacters(in: .whitespaces)
-            guard !trigger.isEmpty else { continue }
-            let escaped = NSRegularExpression.escapedPattern(for: trigger)
-            let pattern = "(?i)^\\s*\(escaped)\\b\\s*[:,\\-—]?\\s*"
-            guard let range = text.range(
-                of: pattern, options: .regularExpression) else { continue }
-            let remainder = String(text[range.upperBound...])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard remainder.split(whereSeparator: { $0.isWhitespace }).count >= 2
-            else { continue }
-            return (template, remainder)
+            for trigger in template.triggers {
+                let escaped = NSRegularExpression.escapedPattern(for: trigger)
+                // A recognizer may end the phrase with a full stop ("Sapulces piezīmes. Labi, tātad…").
+                let pattern = "(?i)^\\s*\(escaped)\\b\\s*[:,.!\\-—]?\\s*"
+                guard let range = text.range(
+                    of: pattern, options: .regularExpression) else { continue }
+                let remainder = String(text[range.upperBound...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard remainder.split(whereSeparator: { $0.isWhitespace }).count >= 2
+                else { continue }
+                return (template, remainder)
+            }
         }
         return nil
     }
@@ -182,6 +233,10 @@ enum NoteTemplateStore {
              "Email Draft", "thanks for joining the call today, let's follow up Friday."),
             ("Summarize this - the launch moved to October because design slipped.",
              "Summary", "the launch moved to October because design slipped."),
+            ("Sapulces piezīmes. Labi, tātad mēs runājām par mājaslapu.",
+             "Meeting Notes", "Labi, tātad mēs runājām par mājaslapu."),
+            ("uzdevumu saraksts: rīt jāpiezvana bankai un jānosūta rēķins",
+             "Task List", "rīt jāpiezvana bankai un jānosūta rēķins"),
             // Should NOT trigger: real sentence merely starting with a similar word.
             ("Email John about the pricing sheet before tomorrow.", nil, nil),
             // Should NOT trigger: bare trigger with no real content after it.
@@ -231,14 +286,9 @@ enum NoteTemplateStore {
                 .contains(meetingNotes.exampleOutput!),
               "Meeting Notes example output reaches the composed instructions")
 
-        // Task List deliberately ships without one — tested and found not
-        // to help (see the comment on its definition above) — so this
-        // guards against one silently reappearing half-set later.
-        let taskList = NoteTemplate.builtIns.first { $0.name == "Task List" }!
-        check(taskList.exampleInput == nil && taskList.exampleOutput == nil,
-              "Task List deliberately has no worked example")
-        check(taskList.workedExampleBlock.isEmpty,
-              "Task List composes with no example block")
+        // Every built-in carries a complete worked example since the structured engine (`TemplateEngine`).
+        check(NoteTemplate.builtIns.allSatisfy { !$0.workedExampleBlock.isEmpty },
+              "every built-in template has a complete worked example")
 
         return passed
     }

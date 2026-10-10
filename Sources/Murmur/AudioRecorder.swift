@@ -1,6 +1,7 @@
 import AVFoundation
 import AudioToolbox
 import CoreAudio
+import CoreGraphics
 import Foundation
 
 /// Captures microphone audio into a temporary file while the hotkey is held.
@@ -11,6 +12,10 @@ import Foundation
 ///   audio system-wide and can feed the recognizer silence.
 /// - A warm always-on engine with a pre-roll ring buffer: wedged the engine
 ///   so recording never started.
+///
+/// Which microphone, and what happens when the hardware changes mid-recording
+/// or the microphone delivers nothing, is decided per recording and needs no
+/// setting — see `MicrophoneChoice`, `onInterrupted` and `deliveredOnlyZeros`.
 final class AudioRecorder {
     private let engine = AVAudioEngine()
     private var file: AVAudioFile?
@@ -74,6 +79,62 @@ final class AudioRecorder {
     /// `onLiveBuffer`: called synchronously from the tap callback, so
     /// whatever's attached here must return immediately.
     var onLivePreviewBuffer: ((AVAudioPCMBuffer) -> Void)?
+    /// A third, for transcribing a long dictation while it's still being spoken (`LiveChunkSession`): whisper.cpp
+    /// dictations only. Same real-time contract — it copies the samples and returns.
+    var onLiveChunkBuffer: ((AVAudioPCMBuffer) -> Void)?
+    /// How loud each buffer is, 0…1 (`level(of:)`) — what the HUD's bars show while you talk. Same real-time contract as
+    /// `onLiveBuffer`: called from the tap callback, so it must hand the value off and return.
+    var onLevel: ((Float) -> Void)?
+
+    /// Called on the main thread when the audio hardware changes under a recording — a headset connecting, a dock,
+    /// the Mac waking. The engine stops itself when that happens (Apple: it "stops, uninitializes itself"), so the
+    /// rest of the dictation used to vanish without a word; the caller finishes it with what was captured instead.
+    var onInterrupted: (() -> Void)?
+    private var configurationObserver: NSObjectProtocol?
+    private var startedAt: Date?
+    /// Switching the input device at the start of a recording can post the same notification — that one is ours.
+    private var deviceSwitchedAt: Date?
+    /// Frames that weren't pure digital zero. A microphone that is denied, cut off in hardware (a closed MacBook
+    /// lid) or held by another device delivers exact zeros rather than an error, so "a quiet room" and "the
+    /// microphone isn't delivering" can be told apart.
+    private var nonZeroFrameCount: AVAudioFramePosition = 0
+    private var firstBufferAt: Date?
+    private var firstSoundAt: Date?
+    /// How the input this recording used is connected (`kAudioDeviceTransportType…`), for the message when it
+    /// delivered nothing.
+    private(set) var inputTransport: UInt32 = 0
+    /// Run by the next tap buffer — `stopAfterTail`'s signal that the audio in flight at the key's release is in.
+    private let tailLock = NSLock()
+    private var tailWaiter: (() -> Void)?
+
+    /// This recording's start-up, for the command line's check: milliseconds from start to the first buffer and to the
+    /// first buffer with sound in it.
+    private(set) var lastStartup: (firstBuffer: Int?, firstSound: Int?) = (nil, nil)
+    /// Keep each recording's start-up in `MicTimingLog` — the dictation recorder only.
+    var recordsStartup = false
+
+    /// Frames arrived and every one was exact zero: the microphone isn't delivering, it isn't a quiet room.
+    var deliveredOnlyZeros: Bool { capturedFrames > 0 && nonZeroFrameCount == 0 }
+    var inputIsBluetooth: Bool {
+        inputTransport == kAudioDeviceTransportTypeBluetooth || inputTransport == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    init() {
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in self?.configurationChanged() }
+    }
+
+    deinit {
+        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
+    }
+
+    private func configurationChanged() {
+        guard isRecording else { return }
+        if let switched = deviceSwitchedAt, Date().timeIntervalSince(switched) < 1 { return }
+        dictationLog.error("mic: the audio hardware changed during a recording; finishing with what was captured")
+        onInterrupted?()
+    }
 
     static func requestMicrophoneAccess() async -> Bool {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -90,17 +151,9 @@ final class AudioRecorder {
         guard !isRecording else { return }
 
         let input = engine.inputNode
-        // Pin to the built-in mic rather than trusting whatever the system's
-        // current default input is. A Bluetooth headset's default input sits
-        // in high-quality output-only mode (A2DP) until something asks for
-        // input, at which point macOS switches it into a lower-quality
-        // bidirectional mode (HFP) — a real hardware renegotiation. That
-        // switch is what visibly ducks whatever else is playing, and it can
-        // take longer than a quick hold-to-talk press: the recording ends
-        // before the mic ever delivers a frame, so every dictation silently
-        // came back empty. Best-effort — a Mac with no built-in mic just
-        // keeps using the system default, same as before.
-        preferBuiltInMicrophone(on: input)
+        // Which microphone: the one chosen in System Settings, unless it's a
+        // Bluetooth headset or a virtual device — see `MicrophoneChoice`.
+        chooseMicrophone(on: input)
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw NSError(
@@ -123,6 +176,13 @@ final class AudioRecorder {
         capturedFormat = nil
         hasSignal = false
         signalFrameCount = 0
+        nonZeroFrameCount = 0
+        firstBufferAt = nil
+        firstSoundAt = nil
+        startedAt = Date()
+        tailLock.lock()
+        tailWaiter = nil
+        tailLock.unlock()
 
         // `format: nil` means "whatever this bus is actually running at".
         //
@@ -145,11 +205,23 @@ final class AudioRecorder {
             }
             try? self.file?.write(from: buffer)
             self.capturedFrames += AVAudioFramePosition(buffer.frameLength)
+            if self.firstBufferAt == nil { self.firstBufferAt = Date() }
+            if Self.containsNonZero(buffer) {
+                self.nonZeroFrameCount += AVAudioFramePosition(buffer.frameLength)
+            }
             if Self.hasSignal(in: buffer, above: self.silenceRMSThreshold) {
                 self.signalFrameCount += AVAudioFramePosition(buffer.frameLength)
+                if self.firstSoundAt == nil { self.firstSoundAt = Date() }
             }
             self.onLiveBuffer?(buffer)
             self.onLivePreviewBuffer?(buffer)
+            self.onLiveChunkBuffer?(buffer)
+            if let onLevel = self.onLevel { onLevel(Self.level(of: buffer)) }
+            self.tailLock.lock()
+            let tailWaiter = self.tailWaiter
+            self.tailWaiter = nil
+            self.tailLock.unlock()
+            tailWaiter?()
         }
 
         do {
@@ -180,6 +252,24 @@ final class AudioRecorder {
         engine.stop()
         isRecording = false
         file = nil
+        tailLock.lock()
+        tailWaiter = nil
+        tailLock.unlock()
+        // How long the microphone took to deliver, by connection — durations only. What decides whether a warmer
+        // microphone is ever worth its always-on indicator (lost first words are 0.4% of errors today).
+        if let startedAt {
+            func milliseconds(_ date: Date?) -> Int? { date.map { Int($0.timeIntervalSince(startedAt) * 1000) } }
+            func ms(_ date: Date?) -> String { milliseconds(date).map(String.init) ?? "-" }
+            lastStartup = (milliseconds(firstBufferAt), milliseconds(firstSoundAt))
+            if recordsStartup {
+                MicTimingLog.record(transport: Self.transportName(inputTransport), firstBuffer: lastStartup.firstBuffer,
+                                    firstSound: lastStartup.firstSound, onlyZeros: deliveredOnlyZeros)
+            }
+            // Notice, not info: macOS throws info-level lines away, and this one is what decides the warm-mic question.
+            dictationLog.notice(
+                "mic: first buffer \(ms(self.firstBufferAt), privacy: .public) ms, first sound \(ms(self.firstSoundAt), privacy: .public) ms after key-down; transport \(Self.transportName(self.inputTransport), privacy: .public)\(self.deliveredOnlyZeros ? ", EXACT ZEROS" : "", privacy: .public)")
+        }
+        startedAt = nil
         hasSignal = Self.hasSustainedSignal(
             signalFrames: signalFrameCount,
             sampleRate: capturedFormat?.sampleRate ?? 0,
@@ -187,6 +277,24 @@ final class AudioRecorder {
         let url = currentFileURL
         currentFileURL = nil
         return url
+    }
+
+    /// Stops once the audio still in flight when the key came up has arrived — the tap hands audio over in blocks of
+    /// about a tenth of a second, and stopping at once threw away the part of the block holding the end of the last
+    /// word (Handy fixed the same loss in its 0.9.7, PR #1958). Waits for the next block, at most `maxWait`, then
+    /// stops; `completion` runs on the main thread with what `stop()` returns.
+    func stopAfterTail(maxWait: TimeInterval = 0.12, completion: @escaping (URL?) -> Void) {
+        guard isRecording else { completion(nil); return }
+        var finished = false
+        let finish: () -> Void = { [weak self] in
+            guard !finished else { return }
+            finished = true
+            completion(self?.stop())
+        }
+        tailLock.lock()
+        tailWaiter = { DispatchQueue.main.async(execute: finish) }
+        tailLock.unlock()
+        DispatchQueue.main.asyncAfter(deadline: .now() + maxWait, execute: finish)
     }
 
     /// Stops and deletes the in-progress recording.
@@ -197,6 +305,14 @@ final class AudioRecorder {
     }
 
     // MARK: - Silence detection
+
+    /// Any sample that isn't exactly zero. Real microphones always carry some noise; a stream of perfect zeros means
+    /// the device isn't delivering. An unrecognised format counts as delivering (fails open).
+    static func containsNonZero(_ buffer: AVAudioPCMBuffer) -> Bool {
+        guard let samples = buffer.floatChannelData?[0] else { return true }
+        for index in 0..<Int(buffer.frameLength) where samples[index] != 0 { return true }
+        return false
+    }
 
     /// RMS energy of one buffer against a threshold. The tap's format comes
     /// from whatever the live device reports (see `start()`), which in
@@ -218,6 +334,23 @@ final class AudioRecorder {
         return rms > threshold
     }
 
+    /// How loud one buffer is, for the HUD's bars: its RMS in dBFS mapped onto 0…1 — -50 dB (room tone, where the bars
+    /// rest as dots) to -15 dB (loud speech, full height). So a flat line honestly means the microphone isn't hearing
+    /// you. Same format caveat as `hasSignal`: an unrecognised format reads as silent rather than guessing.
+    static func level(of buffer: AVAudioPCMBuffer) -> Float {
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0, let channelData = buffer.floatChannelData else { return 0 }
+        var sumOfSquares: Float = 0
+        let samples = channelData[0]
+        for i in 0..<frameCount {
+            let sample = samples[i]
+            sumOfSquares += sample * sample
+        }
+        let rms = (sumOfSquares / Float(frameCount)).squareRoot()
+        let decibels = 20 * log10(max(rms, 1e-7))
+        return min(max((decibels + 50) / 35, 0), 1)
+    }
+
     /// Whether accumulated above-floor audio time (from summing
     /// `hasSignal(in:above:)` across every buffer in a recording) clears
     /// the minimum a real spoken word needs — as opposed to a single
@@ -232,27 +365,43 @@ final class AudioRecorder {
 
     // MARK: - Device selection
 
-    /// Overrides the input node's hardware device via Core Audio, entirely
-    /// best-effort: any failure along the way just leaves the node on
-    /// whatever the system default already was.
-    private func preferBuiltInMicrophone(on input: AVAudioInputNode) {
+    /// Points the input node at the microphone `MicrophoneChoice` picks. Best-effort: any failure leaves the node on
+    /// whatever it was already using.
+    private func chooseMicrophone(on input: AVAudioInputNode) {
         guard let unit = input.audioUnit else {
             dictationLog.error("mic route: no input AudioUnit yet")
             return
         }
-        guard var deviceID = Self.builtInInputDeviceID() else {
-            dictationLog.info("mic route: no built-in mic found, using system default")
+        let devices = Self.inputDevices()
+        let defaultID = Self.defaultInputDeviceID()
+        var choice = MicrophoneChoice.choose(
+            systemDefault: devices.first { $0.id == defaultID }, all: devices,
+            builtInDisplayActive: Self.builtInDisplayActive())
+        // Debug only (the command line's microphone check): "builtin" to time the Mac's own microphone.
+        if ProcessInfo.processInfo.environment["MURMUR_MIC"] == "builtin" {
+            choice = devices.first { $0.transport == kAudioDeviceTransportTypeBuiltIn }?.id ?? choice
+        }
+        guard var deviceID = choice ?? defaultID else {
+            dictationLog.info("mic route: no input device found, leaving the engine as it is")
             return
         }
+        inputTransport = devices.first { $0.id == deviceID }?.transport ?? 0
+        var current = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let read = AudioUnitGetProperty(
+            unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &current, &size)
+        guard read != noErr || current != deviceID else { return }
+        deviceSwitchedAt = Date()
         let status = AudioUnitSetProperty(
             unit, kAudioOutputUnitProperty_CurrentDevice,
             kAudioUnitScope_Global, 0,
             &deviceID, UInt32(MemoryLayout<AudioDeviceID>.size))
         dictationLog.info(
-            "mic route: pin to built-in device \(deviceID) -> status \(status)")
+            "mic route: \(choice == nil ? "system default" : "instead of the default", privacy: .public) device \(deviceID) (\(Self.transportName(self.inputTransport), privacy: .public)) -> status \(status)")
     }
 
-    private static func builtInInputDeviceID() -> AudioDeviceID? {
+    /// Every device with an input side, with how it's connected.
+    private static func inputDevices() -> [MicrophoneChoice.Device] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -261,19 +410,30 @@ final class AudioRecorder {
         guard AudioObjectGetPropertyDataSize(
             AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize) == noErr,
             dataSize > 0
-        else { return nil }
-
-        let count = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
-        var deviceIDs = [AudioDeviceID](repeating: 0, count: count)
+        else { return [] }
+        var deviceIDs = [AudioDeviceID](repeating: 0, count: Int(dataSize) / MemoryLayout<AudioDeviceID>.size)
         guard AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &address, 0, nil,
             &dataSize, &deviceIDs) == noErr
-        else { return nil }
-
-        return deviceIDs.first { isBuiltIn($0) && hasInputStreams($0) }
+        else { return [] }
+        return deviceIDs.filter(hasInputStreams).map { .init(id: $0, transport: transportType($0)) }
     }
 
-    private static func isBuiltIn(_ deviceID: AudioDeviceID) -> Bool {
+    private static func defaultInputDeviceID() -> AudioDeviceID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var deviceID = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID) == noErr,
+            deviceID != 0
+        else { return nil }
+        return deviceID
+    }
+
+    private static func transportType(_ deviceID: AudioDeviceID) -> UInt32 {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyTransportType,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -282,8 +442,32 @@ final class AudioRecorder {
         var size = UInt32(MemoryLayout<UInt32>.size)
         guard AudioObjectGetPropertyData(
             deviceID, &address, 0, nil, &size, &transportType) == noErr
-        else { return false }
-        return transportType == kAudioDeviceTransportTypeBuiltIn
+        else { return 0 }
+        return transportType
+    }
+
+    /// The MacBook's own screen is on. With the lid closed the built-in microphone is disconnected in hardware
+    /// (Apple Platform Security) but still listed, and records pure silence.
+    private static func builtInDisplayActive() -> Bool {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return false }
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &displays, &count) == .success else { return false }
+        return displays.contains { CGDisplayIsBuiltin($0) != 0 }
+    }
+
+    static func transportName(_ transport: UInt32) -> String {
+        switch transport {
+        case kAudioDeviceTransportTypeBuiltIn: return "built-in"
+        case kAudioDeviceTransportTypeUSB: return "USB"
+        case kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE: return "Bluetooth"
+        case kAudioDeviceTransportTypeVirtual: return "virtual"
+        case kAudioDeviceTransportTypeAggregate: return "aggregate"
+        case kAudioDeviceTransportTypeDisplayPort, kAudioDeviceTransportTypeHDMI: return "display"
+        case kAudioDeviceTransportTypeThunderbolt: return "Thunderbolt"
+        case 0: return "unknown"
+        default: return "other"
+        }
     }
 
     /// A device can be built-in and output-only (the Mac's speakers) — this
@@ -383,5 +567,102 @@ final class AudioRecorder {
               "exactly the duration floor is signal")
 
         return passed
+    }
+}
+
+/// Which microphone a dictation records from. Automatic, nothing to set:
+///  1. with the lid open, the Mac's own microphone — it starts fastest, and whatever is said while a microphone is
+///     still starting is lost. Measured 2026-09-30: the built-in mic delivered its first audio 155 ms after the key,
+///     a Studio Display microphone (USB) 555 ms — for the day Murmur followed the system default to the Studio
+///     Display, every dictation lost about 0.4 s more at the start;
+///  2. otherwise (lid closed — the built-in mic is then disconnected in hardware but still listed, and records pure
+///     silence) the microphone chosen in System Settings when it's wired, else the first wired one. Never a Bluetooth
+///     headset while a wired one exists (switching it into call mode ducks what's playing and can outlast a quick
+///     press) or a virtual device (often silent unless its app is running);
+///  3. with nothing wired, the system default after all.
+/// `nil` means "the system default".
+enum MicrophoneChoice {
+    struct Device: Equatable {
+        let id: AudioDeviceID
+        let transport: UInt32
+    }
+
+    static let wired: Set<UInt32> = [
+        kAudioDeviceTransportTypeBuiltIn, kAudioDeviceTransportTypeUSB, kAudioDeviceTransportTypeDisplayPort,
+        kAudioDeviceTransportTypeHDMI, kAudioDeviceTransportTypeThunderbolt, kAudioDeviceTransportTypePCI,
+        kAudioDeviceTransportTypeFireWire, kAudioDeviceTransportTypeAVB,
+    ]
+
+    static func choose(systemDefault: Device?, all: [Device], builtInDisplayActive: Bool) -> AudioDeviceID? {
+        func usable(_ device: Device) -> Bool {
+            wired.contains(device.transport)
+                && (device.transport != kAudioDeviceTransportTypeBuiltIn || builtInDisplayActive)
+        }
+        if builtInDisplayActive, let builtIn = all.first(where: { $0.transport == kAudioDeviceTransportTypeBuiltIn }) {
+            return systemDefault?.id == builtIn.id ? nil : builtIn.id
+        }
+        if let systemDefault, usable(systemDefault) { return nil }
+        return all.first(where: usable)?.id
+    }
+
+    static func runSelfTest() -> Bool {
+        var passed = true
+        func check(_ ok: Bool, _ label: String) {
+            if !ok { passed = false }
+            print("\(ok ? "PASS" : "FAIL"): microphone: \(label)")
+        }
+        let builtIn = Device(id: 1, transport: kAudioDeviceTransportTypeBuiltIn)
+        let airPods = Device(id: 2, transport: kAudioDeviceTransportTypeBluetooth)
+        let studioDisplay = Device(id: 3, transport: kAudioDeviceTransportTypeUSB)
+        let teams = Device(id: 4, transport: kAudioDeviceTransportTypeVirtual)
+        let everything = [builtIn, airPods, studioDisplay, teams]
+        check(choose(systemDefault: airPods, all: everything, builtInDisplayActive: true) == 1,
+              "AirPods as the default, lid open: the built-in mic, as before")
+        check(choose(systemDefault: studioDisplay, all: everything, builtInDisplayActive: true) == 1,
+              "lid open: the built-in mic even when a display mic is the default — it starts 0.4 s sooner")
+        check(choose(systemDefault: builtIn, all: everything, builtInDisplayActive: true) == nil,
+              "the built-in mic as the default, lid open: kept")
+        check(choose(systemDefault: builtIn, all: everything, builtInDisplayActive: false) == 3,
+              "lid closed: never the disconnected built-in mic — the display's")
+        check(choose(systemDefault: airPods, all: everything, builtInDisplayActive: false) == 3,
+              "AirPods, lid closed: the wired display microphone")
+        check(choose(systemDefault: teams, all: everything, builtInDisplayActive: true) == 1,
+              "a virtual device as the default: the built-in mic")
+        check(choose(systemDefault: airPods, all: [builtIn, airPods], builtInDisplayActive: false) == nil,
+              "lid closed and nothing wired: the default after all, not a dead mic")
+        return passed
+    }
+}
+
+/// Each dictation's microphone start-up — which kind of microphone, how long until the first audio arrived and until
+/// the first sound — the last 200, on this Mac only (`~/Library/Application Support/Murmur/mic_timings.json`). Whether
+/// a warmer microphone is ever worth its always-on indicator is decided from these real numbers, not guessed.
+enum MicTimingLog {
+    struct Entry: Codable {
+        let date: Date
+        let transport: String
+        let firstBufferMs: Int?
+        let firstSoundMs: Int?
+        let onlyZeros: Bool
+    }
+
+    static let limit = 200
+    private static let queue = DispatchQueue(label: "local.murmur.mic-timing-log")
+    static var fileURL: URL { AppPaths.supportDirectory.appendingPathComponent("mic_timings.json") }
+
+    static func record(transport: String, firstBuffer: Int?, firstSound: Int?, onlyZeros: Bool) {
+        let entry = Entry(date: Date(), transport: transport, firstBufferMs: firstBuffer, firstSoundMs: firstSound,
+                          onlyZeros: onlyZeros)
+        queue.async {
+            var entries = load()
+            entries.append(entry)
+            if entries.count > limit { entries.removeFirst(entries.count - limit) }
+            if let data = try? JSONEncoder().encode(entries) { try? data.write(to: fileURL, options: .atomic) }
+        }
+    }
+
+    static func load() -> [Entry] {
+        guard let data = try? Data(contentsOf: fileURL) else { return [] }
+        return (try? JSONDecoder().decode([Entry].self, from: data)) ?? []
     }
 }

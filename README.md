@@ -72,16 +72,12 @@ speech and language models, with an optional local Whisper engine.
   <td width="50%"><img src="Resources/screenshot-ask.jpg" alt="Ask Murmur"><br><sub>Ask Murmur</sub></td>
 </tr>
 <tr>
-  <td width="50%"><img src="Resources/screenshot-notetaker.jpg" alt="Notetaker"><br><sub>Notetaker</sub></td>
   <td width="50%"><img src="Resources/screenshot-voice-profile.jpg" alt="Voice Profile"><br><sub>Voice Profile</sub></td>
-</tr>
-<tr>
   <td width="50%"><img src="Resources/screenshot-style.jpg" alt="Style"><br><sub>Style</sub></td>
-  <td width="50%"><img src="Resources/screenshot-snippets.jpg" alt="Snippets"><br><sub>Snippets</sub></td>
 </tr>
 <tr>
+  <td width="50%"><img src="Resources/screenshot-snippets.jpg" alt="Snippets"><br><sub>Snippets</sub></td>
   <td width="50%"><img src="Resources/screenshot-settings.jpg" alt="Settings"><br><sub>Settings</sub></td>
-  <td width="50%"></td>
 </tr>
 </table>
 
@@ -126,14 +122,15 @@ re-grant Accessibility after each rebuild.
 
 ## Privacy
 
-Everything runs on this Mac: recognition (Apple SpeechAnalyzer or a local
-Whisper/Parakeet model), cleanup, tone rewriting (Apple Intelligence), and
-the Voice Profile analysis. Murmur makes no network requests except the
-one-time model downloads by macOS itself (Apple speech assets) and, if you
-opt into a non-Apple engine, that model's own one-time fetch (Hugging Face
-for Whisper, FluidAudio's own CDN for Parakeet, GitHub Releases for
-sherpa-onnx). Dictation data is stored only in
-`~/Library/Application Support/Murmur/`.
+Recognition (Apple SpeechAnalyzer or a local speech model), cleanup, tone
+rewriting (Apple Intelligence), and Voice Profile analysis run on this Mac.
+Dictation data is stored in `~/Library/Application Support/Murmur/`; history
+keeps up to 90 days or 5,000 entries and can be cleared from Home. macOS may
+download Apple speech assets, and choosing another engine may download its
+model from its provider. Source builds check GitHub for app updates. Official
+release builds check Murmur's signed update feed and use the licensing server
+for activation and roughly weekly license checks; those requests do not
+include dictated audio or transcripts.
 
 ## Architecture
 

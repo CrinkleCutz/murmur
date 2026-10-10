@@ -313,6 +313,7 @@ enum MurmurIcon {
     case settings, help, search, trash, copy, edit, plus, check, refresh
     case lines, wave, calendar, arrowRight, caret, bell, mic, fingerprint
     case wrench, lock, apps, sidebar, more, moreVertical, notetaker, clock
+    case key
 
     var elements: [SVGPrimitive] {
         switch self {
@@ -497,6 +498,13 @@ enum MurmurIcon {
             return [
                 .rect(x: 40, y: 88, width: 176, height: 128, rx: 8),
                 .path("M88,88V56a40,40,0,0,1,80,0V88"),
+            ]
+        case .key:
+            // Phosphor "key" (MIT), like the rest of the set: a round bow top-right, the shaft and its two notches
+            // down to the bottom-left, and the hole in the bow.
+            return [
+                .path("M93.17,122.83a72,72,0,1,1,40,40h0L120,176H96v24H72v24H40a8,8,0,0,1-8-8V187.31a8,8,0,0,1,2.34-5.65l58.83-58.83Z"),
+                .circle(cx: 180, cy: 76, r: 12, filled: true),
             ]
         case .apps:
             return [

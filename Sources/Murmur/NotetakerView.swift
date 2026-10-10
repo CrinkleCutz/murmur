@@ -3,12 +3,11 @@ import SwiftUI
 
 // MARK: - Notetaker
 //
-// Same `GlassPanelPage` shell and warm palette as every other page in this
-// redesign. Structurally: a hero explaining what this is (mirrors
-// Scratchpad's own hero, the closest sibling on this rail), a status card
-// covering permissions and the current capture, and a Recents list below
-// — same shape Scratchpad already established for "a list of past things
-// this page produced," not a new pattern invented just for this page.
+// One white "now" card that follows the capture state (idle / listening /
+// processing, or the Screen Recording prompt), with browser detection and
+// calendar as real option rows inside it; below, saved notes grouped by day
+// like Home's history, or — before the first one — an example of what a
+// note looks like. No orange card: orange is an accent in Murmur, never a fill.
 
 struct NotetakerPage: View {
     @ObservedObject var app: AppDelegate
@@ -42,12 +41,19 @@ struct NotetakerPage: View {
             ThinScrollView(bottomInset: 12) {
                 VStack(alignment: .leading, spacing: 0) {
                     header
-                    hero.padding(.top, 20)
-                    statusCard.padding(.top, 20)
-                    recentsHeader.padding(.top, 28)
-                    recentsList.padding(.top, 10)
+                    statusCard.padding(.top, 24)
+                    if controller.notes.isEmpty {
+                        exampleCard.padding(.top, 24)
+                    } else {
+                        notesToolbar.padding(.top, 20)
+                        notesList
+                    }
                 }
+                .padding(.horizontal, Self.bleed)
             }
+            // Widened by the rows' highlight bleed so the scroll view's clip
+            // doesn't cut it off; the content is inset back above.
+            .padding(.horizontal, -Self.bleed)
         }
         .onAppear { controller.refreshScreenRecordingStatus() }
         .sheet(item: $selectedNote) { note in
@@ -61,44 +67,27 @@ struct NotetakerPage: View {
         }
     }
 
+    /// How far a note row's hover highlight reaches past the text — the
+    /// same 10pt as Home's history rows.
+    static let bleed: CGFloat = 10
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Notetaker")
                 .font(.manrope(22, .medium))
                 .tracking(-0.33)
                 .foregroundStyle(Palette.warmInk)
-            Text("Automatic notes for your calls — captured, transcribed, and summarized on-device.")
+            // The old orange card's promise, folded into the subtitle.
+            Text("Automatic notes for your calls, made on this Mac — no bot joins your call, and nothing "
+                 + "about the people on it is looked up online.")
                 .font(.manrope(12.5))
                 .foregroundStyle(Palette.warmInkFaint)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var hero: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Meeting notes without the app leaving your Mac")
-                .font(.manrope(19, .medium))
-                .tracking(-0.2)
-                .foregroundStyle(.white)
-            Text("Murmur listens to your mic and the call's own audio locally, tells voices apart, "
-                 + "and writes up a summary and action items — no bot joins your call, and nothing "
-                 + "about the people on it is looked up online.")
-                .font(.manrope(12.5))
-                .foregroundStyle(.white.opacity(0.85))
-                .lineSpacing(3)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 460, alignment: .leading)
-        }
-        .padding(.horizontal, 28)
-        .padding(.vertical, 24)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        // Flat, not the gradient Home/Insights use for their own hero
-        // cards, by request — just `sunset`, the gradient's own darker
-        // stop, as a solid fill (same call as Scratchpad's hero).
-        .background(Palette.sunset, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .shadow(color: .black.opacity(0.04), radius: 1, y: 1)
-        .shadow(color: .black.opacity(0.06), radius: 16, y: 16)
-    }
+    // MARK: Now card
 
     @ViewBuilder
     private var statusCard: some View {
@@ -118,139 +107,140 @@ struct NotetakerPage: View {
                     .foregroundStyle(Palette.sunsetDeep)
             }
             .frame(width: 34, height: 34)
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("Screen Recording access needed")
-                    .font(.manrope(13, .semibold))
+                    .font(.manrope(15, .semibold))
                     .foregroundStyle(Palette.warmInk)
                 Text("Notetaker uses this only to hear the other side of a call through the "
                      + "meeting app's own audio — it never records your screen.")
-                    .font(.manrope(12))
+                    .font(.manrope(12.5))
                     .foregroundStyle(Palette.warmInkSoft)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Enable in System Settings") {
-                    controller.requestScreenRecordingAccess()
+                Button { controller.requestScreenRecordingAccess() } label: {
+                    PrimaryActionLabel(title: "Enable in System Settings", icon: nil)
                 }
-                .buttonStyle(GhostButtonStyle())
-                .padding(.top, 2)
+                .buttonStyle(PressScaleButtonStyle(scale: 0.97))
+                .padding(.top, 10)
             }
             Spacer(minLength: 0)
         }
-        .padding(18)
+        .padding(24)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
+    /// Follows the capture state. Starting is sunset (it starts recording
+    /// now — the same rule as Record elsewhere), stopping is red; the
+    /// options only show while idle. Errors sit inside the card.
     private var captureCard: some View {
-        HStack(spacing: 14) {
-            switch controller.state {
-            case .idle:
-                statusDot(color: Palette.warmInkFainter)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(idleStatusLabel)
-                        .font(.manrope(13, .semibold))
-                        .foregroundStyle(Palette.warmInk)
-                    Text(controller.isDiarizerReady
-                         ? "Ready — captures your mic and, if you start it, the call's own audio."
-                         : "Preparing the on-device speaker model — capture still works meanwhile.")
-                        .font(.manrope(11.5))
-                        .foregroundStyle(Palette.warmInkFaint)
-                    if !controller.detector.calendarAuthorized {
-                        // Entirely optional — capture works without this —
-                        // so this asks for the permission on request, not
-                        // automatically at launch the way Mic does: a
-                        // calendar-access prompt with no clear trigger the
-                        // user just did reads as Murmur reaching for more
-                        // than it needs.
-                        Button("Connect Calendar for real titles & speaker names") {
-                            Task { await controller.detector.requestCalendarAccess() }
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 14) {
+                switch controller.state {
+                case .idle:
+                    statusDot(color: Palette.warmInkFainter)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(idleStatusLabel)
+                            .font(.manrope(15, .semibold))
+                            .foregroundStyle(Palette.warmInk)
+                        Text(controller.isDiarizerReady
+                             ? "Start it before or during a call — it captures your mic and the call's own audio."
+                             : "Preparing the on-device speaker model — capture still works meanwhile.")
+                            .font(.manrope(12.5))
+                            .foregroundStyle(Palette.warmInkSoft)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 12)
+                    Button { controller.start(app: controller.detector.activeMeetingApp) } label: {
+                        HStack(spacing: 7) {
+                            Circle().fill(.white).frame(width: 9, height: 9)
+                            Text("Start Notetaker").font(.manrope(13, .semibold))
                         }
-                        .buttonStyle(.plain)
-                        .font(.manrope(11, .medium))
-                        .foregroundStyle(Palette.sunsetDeep)
-                        .padding(.top, 2)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .frame(height: 36)
+                        .background(Palette.sunset, in: RoundedRectangle(cornerRadius: Radius.md))
                     }
-                    if !browserDetectionEnabled {
-                        // Off by default and turned on here rather than
-                        // silently — this means Murmur periodically reads
-                        // the active browser tab's URL while a browser is
-                        // frontmost, purely to check it against known
-                        // meeting-link patterns, so it's worth the user
-                        // actually choosing it rather than inheriting it.
-                        Button("Also detect meetings in your browser (Chrome, Safari, Edge, Arc, Brave)") {
-                            Settings.browserMeetingDetectionEnabled = true
-                            browserDetectionEnabled = true
+                    .buttonStyle(PressScaleButtonStyle(scale: 0.97))
+
+                case .capturing(let startedAt):
+                    statusDot(color: Palette.sunset, pulsing: true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        // A running timer, not just the start time.
+                        TimelineView(.periodic(from: startedAt, by: 1)) { context in
+                            Text("Listening · \(Self.elapsed(from: startedAt, to: context.date))")
+                                .font(.manrope(15, .semibold))
+                                .monospacedDigit()
+                                .foregroundStyle(Palette.warmInk)
                         }
+                        // A rough, live-updating caption of each side — not
+                        // the real transcript (that's diarized properly once
+                        // capture stops), just reassurance Murmur is hearing
+                        // the call. Head-truncated so the newest words show.
+                        if !controller.liveTranscriptYou.isEmpty {
+                            liveLine("You", controller.liveTranscriptYou)
+                        }
+                        if !controller.liveTranscriptOthers.isEmpty {
+                            liveLine("Them", controller.liveTranscriptOthers)
+                        }
+                    }
+                    Spacer(minLength: 12)
+                    Button("Cancel") { controller.cancel() }
                         .buttonStyle(.plain)
-                        .font(.manrope(11, .medium))
-                        .foregroundStyle(Palette.sunsetDeep)
-                        .padding(.top, 2)
-                    }
-                }
-                Spacer(minLength: 0)
-                Button("Start Notetaker") {
-                    controller.start(app: controller.detector.activeMeetingApp)
-                }
-                .buttonStyle(PressScaleButtonStyle(scale: 0.97))
-                .font(.manrope(12.5, .semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .background(Palette.navActivePill, in: RoundedRectangle(cornerRadius: Radius.sm))
-
-            case .capturing(let startedAt):
-                statusDot(color: Palette.sunset, pulsing: true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Listening…")
-                        .font(.manrope(13, .semibold))
-                        .foregroundStyle(Palette.warmInk)
-                    Text("Started \(startedAt, format: .dateTime.hour().minute())")
-                        .font(.manrope(11.5))
-                        .foregroundStyle(Palette.warmInkFaint)
-                    // A rough, live-updating caption of what's being
-                    // picked up on each side — not the real transcript
-                    // (that's diarized properly once capture stops), just
-                    // reassurance Murmur is actually hearing the call, the
-                    // same role a live preview plays during normal
-                    // dictation. Head-truncated so the most recent words
-                    // stay visible as the line keeps growing.
-                    if !controller.liveTranscriptYou.isEmpty {
-                        liveLine("You", controller.liveTranscriptYou)
-                    }
-                    if !controller.liveTranscriptOthers.isEmpty {
-                        liveLine("Them", controller.liveTranscriptOthers)
-                    }
-                }
-                Spacer(minLength: 0)
-                Button("Cancel") { controller.cancel() }
-                    .buttonStyle(GhostButtonStyle())
-                Button("Stop & Save") { controller.stop() }
-                    .buttonStyle(DangerButtonStyle())
-
-            case .processing:
-                statusDot(color: Palette.warmInkFainter)
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Transcribing and summarizing…")
-                        .font(.manrope(12.5))
+                        .font(.manrope(13, .medium))
                         .foregroundStyle(Palette.warmInkSoft)
+                    Button { controller.stop() } label: {
+                        HStack(spacing: 7) {
+                            RoundedRectangle(cornerRadius: 2).fill(.white).frame(width: 10, height: 10)
+                            Text("Stop & save").font(.manrope(13, .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .frame(height: 36)
+                        .background(Palette.danger, in: RoundedRectangle(cornerRadius: Radius.md))
+                    }
+                    .buttonStyle(PressScaleButtonStyle(scale: 0.97))
+
+                case .processing:
+                    statusDot(color: Palette.warmInkFainter)
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Transcribing and summarizing…")
+                            .font(.manrope(15, .semibold))
+                            .foregroundStyle(Palette.warmInk)
+                    }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
             }
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(alignment: .bottom) {
             if let error = controller.lastError {
                 Text(error)
-                    .font(.manrope(11.5))
+                    .font(.manrope(12))
                     .foregroundStyle(Palette.danger)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .offset(y: 26)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 10)
+                    .padding(.leading, 34)
+            }
+            if isIdle {
+                NotetakerOptions(detector: controller.detector,
+                                 browserDetectionEnabled: $browserDetectionEnabled)
+                    .padding(.top, 18)
             }
         }
+        .padding(.horizontal, 24)
+        .padding(.top, 22)
+        .padding(.bottom, isIdle ? 10 : 22)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private var isIdle: Bool {
+        if case .idle = controller.state { return true }
+        return false
+    }
+
+    private static func elapsed(from start: Date, to now: Date) -> String {
+        let seconds = max(Int(now.timeIntervalSince(start)), 0)
+        let h = seconds / 3600, m = (seconds % 3600) / 60, s = seconds % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 
     /// "Google Meet looks like it's running" for a browser match, same as
@@ -269,25 +259,82 @@ struct NotetakerPage: View {
     }
 
     private func liveLine(_ label: String, _ text: String) -> some View {
-        HStack(alignment: .top, spacing: 4) {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text("\(label):")
-                .font(.manrope(10.5, .semibold))
+                .font(.manrope(11.5, .semibold))
                 .foregroundStyle(Palette.warmInkFainter)
             Text(text)
-                .font(.manrope(11))
+                .font(.manrope(12))
                 .foregroundStyle(Palette.warmInkSoft)
                 .lineLimit(1)
                 .truncationMode(.head)
         }
-        .frame(maxWidth: 300, alignment: .leading)
-        .padding(.top, 2)
+        .frame(maxWidth: 460, alignment: .leading)
     }
 
-    private var recentsHeader: some View {
+    // MARK: Before the first note
+
+    /// What a note looks like, faded and labelled as an example — instead
+    /// of a grey box with one sentence.
+    private var exampleCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .lastTextBaseline) {
+                Text("Your meeting notes will appear here")
+                    .font(.manrope(15, .semibold))
+                    .foregroundStyle(Palette.warmInk)
+                Spacer()
+                Text("Example")
+                    .font(.manrope(11.5))
+                    .foregroundStyle(Palette.warmInkFaint)
+            }
+            Text("Each one has a summary, action items you can tick off, and the full transcript with who "
+                 + "said what.")
+                .font(.manrope(12.5))
+                .foregroundStyle(Palette.warmInkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Weekly sync with Anna").font(.manrope(13.5, .semibold))
+                    Spacer()
+                    Text("Zoom · 32 min").font(.manrope(11.5)).foregroundStyle(Palette.warmInkFaint)
+                }
+                Text("Agreed to move the launch to Thursday so the demo video is ready; Anna tells the team today.")
+                    .font(.manrope(12.5))
+                    .foregroundStyle(Palette.warmInkSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 6) {
+                    exampleActionItem("Record the demo video — you, Wednesday")
+                    exampleActionItem("Tell the team about the new date — Anna")
+                }
+            }
+            .foregroundStyle(Palette.warmInk)
+            .padding(16)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Palette.warmRowBorder, lineWidth: 1))
+            .opacity(0.6)
+            .allowsHitTesting(false)
+            .padding(.top, 16)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private func exampleActionItem(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(Palette.warmDivider, lineWidth: 1.2)
+                .frame(width: 13, height: 13)
+            Text(text).font(.manrope(12.5))
+        }
+    }
+
+    // MARK: Notes
+
+    /// Search on the right, like Home's history — only once there are notes.
+    private var notesToolbar: some View {
         HStack(spacing: 10) {
-            Text("Recents")
-                .font(.manrope(13, .semibold))
-                .foregroundStyle(Palette.warmInk)
             Spacer()
             if searchOpen {
                 HStack(spacing: 8) {
@@ -304,94 +351,200 @@ struct NotetakerPage: View {
                 .background(Palette.warmRowBorder, in: RoundedRectangle(cornerRadius: Radius.sm))
                 .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmDivider, lineWidth: 1))
                 .frame(width: 200)
-            } else {
-                Text("\(controller.notes.count) note\(controller.notes.count == 1 ? "" : "s")")
-                    .font(.manrope(11.5))
-                    .foregroundStyle(Palette.warmInkFaint)
             }
             IconButton(icon: searchOpen ? .plus : .search,
                        rotated: searchOpen,
+                       hoverFill: Palette.hoverWash,
                        help: searchOpen ? "Close search" : "Search meetings") {
                 searchOpen.toggle()
                 if !searchOpen { searchText = "" }
             }
         }
+        .padding(.bottom, 4)
     }
 
-    private var recentsList: some View {
-        Group {
-            if controller.notes.isEmpty {
-                Text("No meetings captured yet — start Notetaker before or during a call.")
+    /// Grouped by day and styled like Home's history.
+    private var notesList: some View {
+        let notes = filteredNotes
+        let calendar = Calendar.current
+        let days = Dictionary(grouping: notes) { calendar.startOfDay(for: $0.date) }
+        let order = days.keys.sorted(by: >)
+        return VStack(alignment: .leading, spacing: 0) {
+            if notes.isEmpty {
+                Text("No meetings match \u{201c}\(searchText)\u{201d}.")
                     .font(.manrope(12.5))
                     .italic()
                     .foregroundStyle(Palette.warmInkFaint)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 28)
                     .background(Palette.warmRowBorder, in: RoundedRectangle(cornerRadius: Radius.lg))
-            } else if filteredNotes.isEmpty {
-                Text("No meetings match “\(searchText)”.")
-                    .font(.manrope(12.5))
-                    .italic()
-                    .foregroundStyle(Palette.warmInkFaint)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 28)
-                    .background(Palette.warmRowBorder, in: RoundedRectangle(cornerRadius: Radius.lg))
-            } else {
-                VStack(spacing: 0) {
-                    ForEach(Array(filteredNotes.enumerated()), id: \.element.id) { index, note in
-                        MeetingRow(note: note, isFirst: index == 0) { selectedNote = note }
-                    }
+            }
+            ForEach(Array(order.enumerated()), id: \.element) { index, day in
+                Text(dayLabel(day).uppercased())
+                    .font(.manrope(10, .semibold))
+                    .kerning(0.9)
+                    .foregroundStyle(Palette.warmInkSoft)
+                    .padding(.top, index == 0 ? 0 : 14)
+                    .padding(.bottom, 6)
+                ForEach((days[day] ?? []).sorted { $0.date > $1.date }) { note in
+                    MeetingRow(note: note) { selectedNote = note }
                 }
-                .background(Color.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
         }
     }
+
+    private func dayLabel(_ day: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(day) { return "Today" }
+        if calendar.isDateInYesterday(day) { return "Yesterday" }
+        return day.formatted(.dateTime.month(.abbreviated).day())
+    }
 }
 
+/// Browser detection and calendar as proper option rows (they used to be
+/// orange links that switched a setting on and then vanished, with no way
+/// to switch it back off here). Observes the detector directly so
+/// "Connect" becomes "Connected" the moment access is granted.
+private struct NotetakerOptions: View {
+    @ObservedObject var detector: MeetingDetector
+    @Binding var browserDetectionEnabled: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
+            row("Detect meetings in your browser",
+                "Chrome, Safari, Edge, Arc, Brave — reads the tab's address only to spot a meeting link.") {
+                NotetakerToggle(isOn: Binding(
+                    get: { browserDetectionEnabled },
+                    set: { value in
+                        browserDetectionEnabled = value
+                        Settings.browserMeetingDetectionEnabled = value
+                    }))
+            }
+            Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
+            row("Titles and names from your calendar",
+                "Names a note after the calendar event and its guests. Never changes your calendar.") {
+                if detector.calendarAuthorized {
+                    HStack(spacing: 5) {
+                        MurmurIconView(icon: .check).frame(width: 11, height: 11)
+                        Text("Connected").font(.manrope(12.5, .medium))
+                    }
+                    .foregroundStyle(Palette.warmInkSoft)
+                } else {
+                    Button { Task { await detector.requestCalendarAccess() } } label: {
+                        Text("Connect")
+                            .font(.manrope(12.5, .semibold))
+                            .foregroundStyle(Palette.warmInk)
+                            .padding(.horizontal, 12)
+                            .frame(height: 28)
+                            .background(Palette.panel, in: RoundedRectangle(cornerRadius: Radius.sm))
+                            .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmDivider, lineWidth: 1))
+                    }
+                    .buttonStyle(PressScaleButtonStyle(scale: 0.96))
+                }
+            }
+        }
+    }
+
+    private func row<Trailing: View>(_ title: String, _ detail: String,
+                                     @ViewBuilder trailing: () -> Trailing) -> some View {
+        HStack(alignment: .center, spacing: 16) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.manrope(12.5, .semibold))
+                    .foregroundStyle(Palette.warmInk)
+                Text(detail)
+                    .font(.manrope(12))
+                    .foregroundStyle(Palette.warmInkSoft)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 16)
+            trailing()
+        }
+        .padding(.vertical, 12)
+    }
+}
+
+/// The warm on/off switch used across these pages.
+private struct NotetakerToggle: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Button {
+            withAnimation(.murmurEase(0.18)) { isOn.toggle() }
+        } label: {
+            ZStack(alignment: isOn ? .trailing : .leading) {
+                Capsule()
+                    .fill(isOn ? Palette.sunset : Palette.warmDivider)
+                    .frame(width: 32, height: 19)
+                Circle()
+                    .fill(.white)
+                    .frame(width: 15, height: 15)
+                    .padding(.horizontal, 2)
+            }
+            .frame(width: 32, height: 19)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Styled like Home's history row: time on the left, title and summary
+/// line, "App · 32 min" on the right, the hover wash reaching
+/// `NotetakerPage.bleed` past the text.
 private struct MeetingRow: View {
     let note: MeetingNote
-    let isFirst: Bool
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            HStack(alignment: .top, spacing: 14) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(note.title)
-                        .font(.manrope(13, .semibold))
-                        .foregroundStyle(Palette.warmInk)
-                        .lineLimit(1)
-                    Text(note.summary?.isEmpty == false ? note.summary! : "\(note.wordCount) words transcribed")
-                        .font(.manrope(12))
+            VStack(spacing: 0) {
+                Rectangle().fill(Palette.glassDivider).frame(height: 1)
+                    .padding(.horizontal, NotetakerPage.bleed)
+                    .opacity(hovering ? 0 : 1)
+                HStack(alignment: .top, spacing: 13) {
+                    Text(note.date, format: .dateTime.hour().minute())
+                        .font(.manrope(12, .semibold))
+                        .monospacedDigit()
                         .foregroundStyle(Palette.warmInkSoft)
-                        .lineLimit(2)
-                }
-                Spacer(minLength: 12)
-                VStack(alignment: .trailing, spacing: 3) {
-                    Text(note.date, format: .dateTime.month(.abbreviated).day())
-                        .font(.manrope(11.5, .semibold))
-                        .foregroundStyle(Palette.warmInkSoft)
-                    Text(durationLabel)
-                        .font(.manrope(11))
+                        .frame(width: 40, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(note.title)
+                            .font(.manrope(13, .semibold))
+                            .foregroundStyle(Palette.warmInk)
+                            .lineLimit(1)
+                        Text(note.summary?.isEmpty == false ? note.summary! : "\(note.wordCount) words transcribed")
+                            .font(.manrope(13))
+                            .foregroundStyle(Palette.warmInkSoft)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(metaLabel)
+                        .font(.manrope(11.5))
                         .foregroundStyle(Palette.warmInkFaint)
                 }
+                .padding(.horizontal, NotetakerPage.bleed)
+                .padding(.vertical, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.sm)
+                        .fill(hovering ? Palette.hoverWash : Color.clear))
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
-            .background(hovering ? Palette.warmRowBorder : Color.clear)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .padding(.horizontal, -NotetakerPage.bleed)
         .onHover { hovering = $0 }
-        .overlay(alignment: .top) {
-            if !isFirst { Rectangle().fill(Palette.warmRowBorder).frame(height: 1) }
-        }
+        .animation(.easeOut(duration: 0.1), value: hovering)
     }
 
-    private var durationLabel: String {
+    private var metaLabel: String {
         let minutes = Int(note.duration / 60)
-        return minutes < 1 ? "< 1 min" : "\(minutes) min"
+        let length = minutes < 1 ? "< 1 min" : "\(minutes) min"
+        guard let bundleID = note.appBundleID,
+              NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil
+        else { return length }
+        return "\(AppProfilesPage.resolveApp(bundleID: bundleID).name) · \(length)"
     }
 }
 
@@ -423,7 +576,6 @@ private struct MeetingDetailSheet: View {
         }
         .frame(width: 580, height: 640)
         .background(Palette.homeGradient)
-        .environment(\.colorScheme, .light)
     }
 
     private func content(for note: MeetingNote) -> some View {
@@ -597,7 +749,7 @@ private struct MeetingDetailSheet: View {
                     .font(.manrope(12))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color.white, in: RoundedRectangle(cornerRadius: Radius.sm))
+                    .background(Palette.panel, in: RoundedRectangle(cornerRadius: Radius.sm))
                     .frame(width: 140)
                     .onSubmit {
                         controller.rename(noteID: note.id, speakerIndex: index, to: renameText)

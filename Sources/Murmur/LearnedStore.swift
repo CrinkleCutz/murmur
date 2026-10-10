@@ -26,11 +26,28 @@ enum LearnedStore {
         AppPaths.supportDirectory.appendingPathComponent("learned.json")
     }
 
+    /// Every term and every intended spelling comes back cleaned (`cleanedTerm`), whatever the file holds — so an
+    /// entry saved as "Murmur." by the Voice Training page can't keep turning every "Murmur" into "Murmur." mid-sentence
+    /// (it did, through the personal fuzzy match below, on every dictation that said the name).
     static func load() -> LearnedData {
         guard let data = try? Data(contentsOf: fileURL),
-              let learned = try? JSONDecoder().decode(LearnedData.self, from: data)
+              var learned = try? JSONDecoder().decode(LearnedData.self, from: data)
         else { return LearnedData() }
+        learned.terms = learned.terms.map(cleanedTerm)
+        for index in learned.corrections.indices {
+            learned.corrections[index].intended = cleanedTerm(learned.corrections[index].intended)
+        }
         return learned
+    }
+
+    /// A term as it should be matched and written: no surrounding space, no sentence punctuation stuck to its end.
+    /// Keeps the full stops of an abbreviation made of single letters ("U.S.", "e.g.") and anything inside the term
+    /// ("whisper.cpp", "UI/UX").
+    static func cleanedTerm(_ term: String) -> String {
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.range(of: #"^([A-Za-z]\.)+$"#, options: .regularExpression) != nil { return trimmed }
+        return String(trimmed.reversed().drop(while: { ".,!?;:".contains($0) }).reversed())
+            .trimmingCharacters(in: .whitespaces)
     }
 
     static func save(_ learned: LearnedData) {
@@ -41,13 +58,17 @@ enum LearnedStore {
 
     // MARK: - Recording new knowledge
 
-    /// Adds one mapping (merging duplicates) and remembers the intended term.
-    static func add(heard: String, intended: String) {
+    /// Adds one mapping (merging duplicates) and remembers the intended term. Returns whether the mapping was kept.
+    /// Ordinary words swapped for ordinary words ("For action" → "Correction") are a rewording, not a mishearing: kept
+    /// as a mapping they'd rewrite normal speech ("ready for action"), so nothing at all is learned from them.
+    @discardableResult
+    static func add(heard: String, intended: String) -> Bool {
         let heardTrimmed = normalizePhrase(heard)
-        let intendedTrimmed = intended.trimmingCharacters(in: .whitespacesAndNewlines)
+        let intendedTrimmed = cleanedTerm(intended)
+        if isRewording(heard: heardTrimmed, intended: intendedTrimmed) { return false }
         guard isUsefulMapping(heard: heardTrimmed, intended: intendedTrimmed) else {
             addTerm(intendedTrimmed)
-            return
+            return false
         }
         var learned = load()
         if let index = learned.corrections.firstIndex(where: {
@@ -64,11 +85,27 @@ enum LearnedStore {
         }
         appendTerm(intendedTrimmed, to: &learned)
         save(learned)
+        return true
+    }
+
+    /// Every word on both sides is an ordinary English word — a rewording, not a misheard name. A side with a number
+    /// or a word the dictionary doesn't know ("1030" → "10:30", "par key" → "Parakeet") is never a rewording.
+    static func isRewording(heard: String, intended: String,
+                            isKnownWord: (String) -> Bool = HarperChecker.isKnownEnglishWord) -> Bool {
+        func allKnown(_ phrase: String) -> Bool {
+            let words = phrase.split(whereSeparator: { $0.isWhitespace || $0 == "/" || $0 == "-" })
+            return !words.isEmpty && words.allSatisfy { word in
+                let letters = word.lowercased().filter(\.isLetter)
+                return !letters.isEmpty && letters.count == word.filter { $0.isLetter || $0.isNumber }.count
+                    && isKnownWord(letters)
+            }
+        }
+        return allKnown(heard) && allKnown(intended)
     }
 
     /// Remembers a term for recognition biasing without any mapping.
     static func addTerm(_ term: String) {
-        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = cleanedTerm(term)
         guard !trimmed.isEmpty else { return }
         var learned = load()
         appendTerm(trimmed, to: &learned)
@@ -89,11 +126,8 @@ enum LearnedStore {
     /// substitutions and stores each. Returns how many were learned.
     @discardableResult
     static func learn(original: String, corrected: String) -> Int {
-        let pairs = extractCorrections(original: original, corrected: corrected)
-        for pair in pairs {
-            add(heard: pair.heard, intended: pair.intended)
-        }
-        return pairs.count
+        extractCorrections(original: original, corrected: corrected)
+            .filter { add(heard: $0.heard, intended: $0.intended) }.count
     }
 
     // MARK: - Using the knowledge
@@ -144,23 +178,80 @@ enum LearnedStore {
     /// gets the same safe-by-default floor, not a case-by-case judgment
     /// call.
     static func apply(in text: String, includeDeveloperVocabulary: Bool) -> String {
-        var result = text
-        let personal = load().corrections.map { (heard: $0.heard, intended: $0.intended) }
+        // Web addresses and emails are set aside first, so no taught word can land inside one ("murmurmac.com" was
+        // turned into "Murmur mac.com" by the taught term "Murmur mac").
+        let (masked, restore) = ProtectedSpans.mask(text)
+        var result = masked
+        let learned = load()
+        let personal = learned.corrections.map { (heard: $0.heard, intended: $0.intended) }
         let builtIn = includeDeveloperVocabulary ? DeveloperVocabulary.corrections : []
-        let corrections = (personal + builtIn)
-            .sorted { $0.heard.count > $1.heard.count }
-        for correction in corrections {
-            let escaped = NSRegularExpression.escapedPattern(for: correction.heard)
+        let corrections = (personal.map { ($0.heard, $0.intended, true) } + builtIn.map { ($0.heard, $0.intended, false) })
+            .sorted { $0.0.count > $1.0.count }
+        for (heard, intended, isPersonal) in corrections {
+            // The user's own mishearings also match the same letters split or joined differently — the recognizer
+            // wrote "Whisperflow" when it was taught and "Whisper Flow" today. Built-in ones stay exact, as tuned.
+            let pattern = isPersonal ? flexiblePattern(for: heard)
+                : "(?i)\\b" + NSRegularExpression.escapedPattern(for: heard) + "\\b"
             result = result.replacingOccurrences(
-                of: "(?i)\\b\(escaped)\\b",
-                with: NSRegularExpression.escapedTemplate(for: correction.intended),
+                of: pattern,
+                with: NSRegularExpression.escapedTemplate(for: intended),
                 options: .regularExpression)
         }
         result = DeveloperVocabulary.fuzzyCorrect(
             in: result, against: personalFuzzyTargets(from: personal))
+        result = enforceCasing(in: result, terms: learned.terms + learned.corrections.map(\.intended))
         if includeDeveloperVocabulary {
             result = DeveloperVocabulary.fuzzyCorrect(
                 in: result, against: DeveloperVocabulary.fuzzyCorrectionTargets)
+        }
+        return restore(result)
+    }
+
+    /// A whole-phrase, case-insensitive pattern for a mishearing that also matches its letters split or joined
+    /// differently: "Whisperflow" matches "Whisper Flow" and "Whisper-flow", "revenue cut" matches "revenuecut".
+    /// Only from 6 letters up — a short one like "KPA" or "IIS" stays exact, where a gap could land on real words.
+    static func flexiblePattern(for heard: String) -> String {
+        let characters = Array(heard)
+        guard characters.filter(\.isLetter).count >= 6 else {
+            return "(?i)\\b" + NSRegularExpression.escapedPattern(for: heard) + "\\b"
+        }
+        var pattern = ""
+        for (index, character) in characters.enumerated() {
+            if character == " " || character == "-" {
+                pattern += "[ -]?"
+                continue
+            }
+            pattern += NSRegularExpression.escapedPattern(for: String(character))
+            if index + 1 < characters.count, character.isLetter, characters[index + 1].isLetter {
+                pattern += "[ -]?"
+            }
+        }
+        return "(?i)\\b" + pattern + "\\b"
+    }
+
+    /// Writes the user's own names the way they spelled them: "PlanRify" → "Planrify", "revenuecat" → "RevenueCat",
+    /// "IOS" → "iOS". Only for terms with a capital in them (the capitals are the point) that aren't everyday words —
+    /// "Murmur" and "Gemini" are also ordinary words, and a lowercase term like "dmg" would undo a sentence's capital.
+    static func enforceCasing(in text: String, terms: [String],
+                              isKnownWord: (String) -> Bool = HarperChecker.isKnownEnglishWord) -> String {
+        var result = text
+        var seen = Set<String>()
+        for raw in terms {
+            let term = cleanedTerm(raw)
+            let key = term.lowercased()
+            guard term.contains(where: \.isUppercase), !seen.contains(key) else { continue }
+            seen.insert(key)
+            let unusual = term.split(separator: " ").contains { word in
+                let letters = word.filter(\.isLetter).lowercased()
+                return !letters.isEmpty && !isKnownWord(letters)
+            }
+            guard unusual,
+                  let regex = try? NSRegularExpression(
+                    pattern: "(?i)(?<![\\p{L}\\p{N}])" + NSRegularExpression.escapedPattern(for: term) + "(?![\\p{L}\\p{N}])")
+            else { continue }
+            let range = NSRange(result.startIndex..., in: result)
+            result = regex.stringByReplacingMatches(in: result, range: range,
+                                                    withTemplate: NSRegularExpression.escapedTemplate(for: term))
         }
         return result
     }
@@ -256,6 +347,15 @@ enum LearnedStore {
         return Array(terms.prefix(300))
     }
 
+    /// The user's own words (taught terms, learned spellings, dictionary spellings, snippet triggers), lowercased —
+    /// `WhisperPrompt` puts these ahead of Murmur's built-in developer terms.
+    static func personalTermKeys() -> Set<String> {
+        let learned = load()
+        let all = learned.terms + learned.corrections.map(\.intended)
+            + Array(TextFormatter.loadDictionary().values) + SnippetStore.load().map(\.trigger)
+        return Set(all.map { cleanedTerm($0).lowercased() })
+    }
+
     // MARK: - Diff extraction
 
     /// Word-level diff between the original transcript and the user's
@@ -280,6 +380,9 @@ enum LearnedStore {
                 }
             }
         }
+
+        // One word swapped for another and nothing else touched: the only edit `isRespelledName` is trusted on.
+        let onlyOneWordChanged = n == m && zip(originalWords, correctedWords).filter { $0.key != $1.key }.count == 1
 
         var pairs: [(heard: String, intended: String)] = []
         var i = 0
@@ -307,15 +410,61 @@ enum LearnedStore {
             if !removed.isEmpty, !added.isEmpty,
                removed.count <= 4, added.count <= 4 {
                 let heard = normalizePhrase(removed.joined(separator: " "))
-                let intended = added.joined(separator: " ")
-                    .trimmingCharacters(in: CharacterSet(charactersIn: " ,"))
-                if isUsefulMapping(heard: heard, intended: intended) {
+                let intended = cleanedTerm(added.joined(separator: " ")
+                    .trimmingCharacters(in: CharacterSet(charactersIn: " ,")))
+                if isUsefulMapping(heard: heard, intended: intended),
+                   spellingSimilarity(heard, intended) >= minimumLearnedSimilarity
+                    || (onlyOneWordChanged && isRespelledName(heard: heard, intended: intended)) {
                     pairs.append((heard, intended))
                 }
             }
         }
         return pairs
     }
+
+    /// How alike the two sides of a correction learned from a History edit must be spelled. A mishearing sounds like
+    /// what was said, so it's spelled like it too — "revenue cut" → "RevenueCat" 0.90, "par key" → "Parakeet" 0.62 —
+    /// while an edit made elsewhere in the text that the diff paired with unrelated words isn't: "and then through the"
+    /// → "from Chat" 0.18, which then replaced that everyday phrase in every dictation. The Voice Training page's
+    /// deliberate "say this word" pairs don't go through here.
+    static let minimumLearnedSimilarity = 0.4
+
+    /// 1 − edit distance ÷ longer length, over letters and digits only, ignoring case.
+    static func spellingSimilarity(_ a: String, _ b: String) -> Double {
+        let x = Array(a.lowercased().filter { $0.isLetter || $0.isNumber })
+        let y = Array(b.lowercased().filter { $0.isLetter || $0.isNumber })
+        guard max(x.count, y.count) > 0 else { return 1 }
+        var previous = Array(0...y.count)
+        for i in 1...max(1, x.count) where !x.isEmpty {
+            var current = [i] + Array(repeating: 0, count: y.count)
+            for j in stride(from: 1, through: y.count, by: 1) {
+                current[j] = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (x[i - 1] == y[j - 1] ? 0 : 1))
+            }
+            previous = current
+        }
+        return 1 - Double(x.isEmpty ? y.count : previous[y.count]) / Double(max(x.count, y.count))
+    }
+
+    /// A name that isn't spelled the way it sounds — "Neve" → "Niamh" 0.20, "Shivon" → "Siobhan" 0.43 — is the
+    /// correction this feature is for, and `minimumLearnedSimilarity` alone refuses it. So one word swapped for one
+    /// capitalised word is also learned when the two start with the same sound and neither is an ordinary English
+    /// word: a recogniser gets the start of a name right even when it has never seen the spelling. Only when that
+    /// swap is the whole edit (`onlyOneWordChanged`), which is what the unrelated pairings the floor is there for
+    /// never are.
+    static func isRespelledName(heard: String, intended: String) -> Bool {
+        let from = heard.lowercased().folding(options: .diacriticInsensitive, locale: nil).filter(\.isLetter)
+        let to = intended.folding(options: .diacriticInsensitive, locale: nil).filter(\.isLetter)
+        guard !heard.contains(" "), !intended.contains(" "), from.count >= 3, to.count >= 3,
+              abs(from.count - to.count) <= 3, to.first?.isUppercase == true,
+              let a = from.first, let b = to.lowercased().first,
+              !HarperChecker.isKnownEnglishWord(from), !HarperChecker.isKnownEnglishWord(to.lowercased())
+        else { return false }
+        return a == b || sameOpeningSound.contains { $0.contains(a) && $0.contains(b) }
+    }
+
+    /// Letters that open a name with the same sound: any vowel for any other ("Eefa" → "Aoife"), and the hard
+    /// consonants that share one.
+    private static let sameOpeningSound: [Set<Character>] = [["a", "e", "i", "o", "u", "y"], ["c", "k", "q"], ["g", "j"], ["s", "z"]]
 
     private static func tokenize(_ text: String) -> [(raw: String, key: String)] {
         text.split(whereSeparator: { $0.isWhitespace }).map { token in
@@ -455,6 +604,92 @@ enum LearnedStore {
               == "I saw Soren yesterday",
               "personal fuzzy floor deliberately leaves a short name's near-miss uncaught")
 
+        // Entries are read back clean, and History edits only teach real mishearings.
+        for (raw, clean) in [("Murmur.", "Murmur"), (" Wispr Flow, ", "Wispr Flow"), ("U.S.", "U.S."),
+                             ("whisper.cpp", "whisper.cpp"), ("UI/UX", "UI/UX"), ("Really?!", "Really")] {
+            check(cleanedTerm(raw) == clean, "a term is kept as \"\(clean)\", not \"\(raw)\"")
+        }
+        check(extractCorrections(original: "Please check the revenue cut dashboard.",
+                                 corrected: "Please check the RevenueCat dashboard.").first?.intended == "RevenueCat",
+              "a real mishearing is still learned from a History edit")
+        check(extractCorrections(original: "Apart from that and then through the website we launch.",
+                                 corrected: "Apart from that from Chat website we launch.").isEmpty,
+              "an unrelated rewording is not learned as a mishearing")
+        check(extractCorrections(original: "We launch Mormore today.", corrected: "We launch Murmur. today.")
+                .first?.intended == "Murmur", "a learned spelling never keeps a full stop")
+        // A name spelled unlike it sounds, corrected in place — and the edits that only look like one.
+        for (original, corrected, intended) in [
+            ("Thanks Neve, here is the agenda.", "Thanks Niamh, here is the agenda.", "Niamh"),
+            ("Ask Eefa about the invoice.", "Ask Aoife about the invoice.", "Aoife"),
+            ("I met Keeva yesterday.", "I met Caoimhe yesterday.", "Caoimhe"),
+        ] {
+            check(extractCorrections(original: original, corrected: corrected).first?.intended == intended,
+                  "a name spelled unlike it sounds is learned: \(intended)")
+        }
+        for (original, corrected, why) in [
+            ("Thanks Neve, here is the agenda.", "Thanks Dmitri, here is the agenda.", "a different opening sound"),
+            ("Thanks Neve, here is the agenda.", "Thanks Niamh, here is the plan.", "more than one word changed"),
+            ("Thanks Neve, here is the agenda.", "Thanks niamh, here is the agenda.", "no capital"),
+            ("Thanks never, here is the agenda.", "Thanks Niamh, here is the agenda.", "an ordinary word heard"),
+            ("Thanks Neve, here is the agenda.", "Thanks Nobody, here is the agenda.", "an ordinary word written"),
+        ] {
+            check(extractCorrections(original: original, corrected: corrected).isEmpty,
+                  "…but not learned from an edit with \(why)")
+        }
+        func matches(_ heard: String, _ text: String) -> Bool {
+            text.range(of: flexiblePattern(for: heard), options: .regularExpression) != nil
+        }
+        check(matches("Whisperflow", "I tested Whisper Flow today") && matches("Whisperflow", "a whisper-flow test"),
+              "a taught mishearing still matches when split into two words")
+        check(matches("revenue cut", "check revenuecut now"), "…or joined into one")
+        check(!matches("Whisperflow", "whisper flowchart") && !matches("IIS", "and i is here"),
+              "but never inside a longer word, or across a gap in a short one")
+        let everyday: (String) -> Bool = {
+            ["for", "action", "correction", "the", "army", "is", "still", "are", "we", "base", "ten", "par", "key",
+             "team"].contains($0)
+        }
+        check(isRewording(heard: "For action", intended: "Correction", isKnownWord: everyday)
+              && isRewording(heard: "the army is still", intended: "are we", isKnownWord: everyday),
+              "ordinary words swapped for ordinary words are a rewording, never learned")
+        check(!isRewording(heard: "par key", intended: "Parakeet", isKnownWord: everyday)
+              && !isRewording(heard: "base ten", intended: "Baseten", isKnownWord: everyday)
+              && !isRewording(heard: "1030", intended: "10:30", isKnownWord: everyday)
+              && !isRewording(heard: "Mormo", intended: "team", isKnownWord: everyday),
+              "…while a misheard name, a number or an unknown heard word still is")
+        let known: (String) -> Bool = { ["murmur", "gemini", "app"].contains($0) }
+        check(enforceCasing(in: "PlanRify and revenuecat on IOS", terms: ["Planrify", "RevenueCat", "iOS"], isKnownWord: known)
+              == "Planrify and RevenueCat on iOS", "names come out spelled the user's way")
+        check(enforceCasing(in: "a murmur in the room, Gemini", terms: ["Murmur", "gemini", "dmg"], isKnownWord: known)
+              == "a murmur in the room, Gemini", "everyday words and lowercase terms are left as they are")
         return passed
     }
 }
+
+/// Web addresses and emails in a dictation ("murmurmac.com", "www.example.co.uk", "jane@example.com"), swapped for
+/// placeholders while word corrections run and put back after, so a correction can never change part of one.
+enum ProtectedSpans {
+    static let topLevelDomains = "com|org|net|io|co|uk|dev|app|ai|me|lv|de|eu|us|info|so|sh|xyz|tech|design|studio"
+    private static let pattern = "(?i)(?:[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+)"
+        + "|(?:\\b(?:https?://)?(?:[A-Za-z0-9-]+\\.)+(?:" + topLevelDomains + ")\\b(?:/[^\\s]*)?)"
+
+    static func mask(_ text: String) -> (String, (String) -> String) {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return (text, { $0 }) }
+        var spans: [String] = []
+        var result = text
+        for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+            guard let range = Range(match.range, in: result) else { continue }
+            spans.insert(String(result[range]), at: 0)
+            result.replaceSubrange(range, with: "\u{E000}\u{E001}")
+        }
+        guard !spans.isEmpty else { return (text, { $0 }) }
+        return (result, { masked in
+            var restored = masked
+            for span in spans {
+                guard let range = restored.range(of: "\u{E000}\u{E001}") else { break }
+                restored.replaceSubrange(range, with: span)
+            }
+            return restored
+        })
+    }
+}
+

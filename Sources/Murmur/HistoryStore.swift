@@ -27,8 +27,13 @@ final class HistoryStore {
     /// guarantee any particular time range is actually available, which is
     /// what Home's day-grouped history list needs to be useful rather than
     /// just "however many entries happened to fit."
-    private let retentionDays = 30
-    private let maxEntries = 500
+    ///
+    /// 90 days / 5,000 (was 30 / 500, which a heavy user filled in under two
+    /// weeks): this is everything Ask Murmur can answer from, so it should
+    /// reach back months, not days. Transcripts are small — 5,000 is about
+    /// a megabyte. Lifetime counts don't depend on it (`UsageStatsStore`).
+    private let retentionDays = 90
+    private let maxEntries = 5_000
     private var fileURL: URL {
         AppPaths.supportDirectory.appendingPathComponent("history.json")
     }

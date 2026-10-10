@@ -19,13 +19,13 @@ import SwiftUI
 /// history list, Insights' chart) more room. Every page adopting this
 /// shell should match, not re-introduce the mockup's wider margin.
 ///
-/// Pinned to `.light` colorScheme — none of these pages have a dark
-/// variant in the mockup yet, so this pins `content`'s subtree rather than
-/// half-adapting with nothing to adapt to. Applied here, not by each page
-/// itself, so every adopter gets it automatically and consistently; a page
-/// with its own `.sheet`/`.popover` should attach those outside this view
-/// (on the call site), not inside `content`, so presented content keeps
-/// following the system appearance normally.
+/// Follows `AppearanceSetting` like the rest of the app now that `Palette`'s
+/// warm tokens have real dark values (previously pinned to `.light` here,
+/// since none of these pages had anything to adapt to yet). `.ultraThin
+/// Material` already adapts to dark mode on its own; the stroke/shadow
+/// below stay theme-neutral by design — a white glass-edge highlight and a
+/// dark depth shadow both still read correctly regardless of the page
+/// behind them, the same as real frosted glass would.
 struct GlassPanelPage<Content: View>: View {
     @ViewBuilder var content: Content
 
@@ -41,7 +41,6 @@ struct GlassPanelPage<Content: View>: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 18)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .environment(\.colorScheme, .light)
     }
 }
 
@@ -145,13 +144,16 @@ struct SearchField: View {
 
 /// `.icon-btn` — 26×26, transparent at rest, `--card-hover` fill and
 /// `--ink` icon on hover, 0.9 scale while pressed. The hover fill and the
-/// press-scale are what make it read as a real control.
+/// press-scale are what make it read as a real control. `hoverFill` lets a
+/// button sitting on an already-highlighted surface (Home's lit history
+/// row) use a wash that still shows on top of it.
 struct IconButton: View {
     let icon: MurmurIcon
     var size: CGFloat = 26
     var iconSize: CGFloat = 14
     var rotated: Bool = false
     var tint: Color? = nil
+    var hoverFill: Color = Palette.cardHover
     var help: String? = nil
     let action: () -> Void
 
@@ -166,12 +168,32 @@ struct IconButton: View {
                 .frame(width: size, height: size)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(hovering ? Palette.cardHover : Color.clear))
+                        .fill(hovering ? hoverFill : Color.clear))
                 .contentShape(Rectangle())
         }
         .buttonStyle(PressScaleButtonStyle(scale: 0.9))
         .onHover { hovering = $0 }
         .murmurTooltip(help ?? "")
+    }
+}
+
+/// The page-level primary action ("Start new note", "Add word"): a dark
+/// near-black fill — the same ink as the selected rail row — with white
+/// text and an optional leading icon, 36pt tall. Dark rather than sunset so
+/// orange stays reserved for data and state.
+struct PrimaryActionLabel: View {
+    let title: String
+    var icon: MurmurIcon? = .plus
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let icon { MurmurIconView(icon: icon).frame(width: 12, height: 12) }
+            Text(title).font(.manrope(13, .semibold))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .frame(height: 36)
+        .background(Palette.navActivePill, in: RoundedRectangle(cornerRadius: Radius.md))
     }
 }
 
@@ -582,9 +604,9 @@ struct PulsingDot: View {
 // MARK: - Capture waveform
 
 /// Instrument-scale waveform for Home's capture zone — 17 bars, 76pt tall,
-/// mirrored around a lime centre bar. A distinct, bigger sibling to
-/// `MiniWaveform` (StatusHUD.swift), which stays as-is for the floating HUD;
-/// this one is sized for the editorial capture surface, not a replacement.
+/// mirrored around a lime centre bar. Decorative, unlike the floating HUD's
+/// `LevelBars` (StatusHUD.swift), which follow the microphone's real level;
+/// this one is sized for the editorial capture surface.
 ///
 /// Fixed size, not stretched to the card's own width — a width-filling
 /// version was tried and looked worse, not better: dozens of bars with
@@ -727,9 +749,19 @@ struct FAQItem: View {
 /// `NSScroller` on macOS — confirmed empirically, it still rendered with
 /// only that modifier in place — so `ScrollbarHider` reaches into the
 /// underlying `NSScrollView` directly as a second, load-bearing layer.
+///
+/// Content fades out over the last `edgeFade` points at an edge that has
+/// more to scroll to, instead of being sliced by a hard line mid-card —
+/// the bottom while there's more below, the top once scrolled. At rest on
+/// the first screen the top stays crisp (a page title never fades), and at
+/// the very end the bottom does too.
 struct ThinScrollView<Content: View>: View {
     var bottomInset: CGFloat = 0
     @ViewBuilder var content: Content
+
+    static var edgeFade: CGFloat { 28 }
+
+    @State private var edges = ScrollEdges()
 
     var body: some View {
         GeometryReader { outer in
@@ -738,10 +770,38 @@ struct ThinScrollView<Content: View>: View {
                     .padding(.bottom, bottomInset)
                     .background(ScrollbarHider().frame(width: 0, height: 0))
             }
-            .scrollIndicators(.hidden)
+            // `.never`, not `.hidden`: with System Settings' "Show scroll
+            // bars: Always", `.hidden` still let AppKit reserve a legacy
+            // scroller gutter on some pages — Insights' content sat ~16pt
+            // short of the panel's right edge while its left edge was exact.
+            .scrollIndicators(.never)
+            .onScrollGeometryChange(for: ScrollEdges.self) { geo in
+                ScrollEdges(
+                    moreAbove: geo.contentOffset.y > 1,
+                    moreBelow: geo.contentOffset.y + geo.containerSize.height < geo.contentSize.height - 1)
+            } action: { _, new in
+                edges = new
+            }
+            .mask {
+                VStack(spacing: 0) {
+                    LinearGradient(colors: [.black.opacity(edges.moreAbove ? 0 : 1), .black],
+                                   startPoint: .top, endPoint: .bottom)
+                        .frame(height: Self.edgeFade)
+                    Rectangle()
+                    LinearGradient(colors: [.black, .black.opacity(edges.moreBelow ? 0 : 1)],
+                                   startPoint: .top, endPoint: .bottom)
+                        .frame(height: Self.edgeFade)
+                }
+                .animation(.easeOut(duration: 0.15), value: edges)
+            }
             .environment(\.tooltipClipBounds, outer.frame(in: .global))
         }
     }
+}
+
+private struct ScrollEdges: Equatable {
+    var moreAbove = false
+    var moreBelow = false
 }
 
 /// Zero-size helper that walks up to `enclosingScrollView` once inserted
@@ -761,16 +821,25 @@ struct ThinScrollView<Content: View>: View {
 private struct ScrollbarHider: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
-        DispatchQueue.main.async {
-            guard let scrollView = view.enclosingScrollView else { return }
-            scrollView.scrollerStyle = .overlay
-            scrollView.hasVerticalScroller = false
-            scrollView.hasHorizontalScroller = false
-        }
+        Self.hideScrollers(around: view)
         return view
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    /// Re-applied on every update too, not just once: SwiftUI can
+    /// reconfigure its scroll view after the first pass and hand back the
+    /// legacy style (and its gutter).
+    func updateNSView(_ nsView: NSView, context: Context) {
+        Self.hideScrollers(around: nsView)
+    }
+
+    private static func hideScrollers(around view: NSView) {
+        DispatchQueue.main.async {
+            guard let scrollView = view.enclosingScrollView else { return }
+            if scrollView.scrollerStyle != .overlay { scrollView.scrollerStyle = .overlay }
+            if scrollView.hasVerticalScroller { scrollView.hasVerticalScroller = false }
+            if scrollView.hasHorizontalScroller { scrollView.hasHorizontalScroller = false }
+        }
+    }
 }
 
 // MARK: - Tooltip
@@ -882,5 +951,158 @@ extension View {
         self
             .shadow(color: Palette.shadowNear, radius: 1, y: 1)
             .shadow(color: Palette.shadowFar, radius: 14, y: 10)
+    }
+}
+
+// MARK: - Underlined tabs
+
+/// The underlined tab row Insights, Settings and Help open with: the chosen tab in ink over a sunset underline, the
+/// rest faint, a hairline under the whole row, and a sunset dot on a tab where something needs you. `selected` is nil
+/// while nothing is chosen (Help while it shows search results).
+struct UnderlineTabBar<Tab: Hashable>: View {
+    let tabs: [Tab]
+    let selected: Tab?
+    var attention: Set<Tab> = []
+    let title: (Tab) -> String
+    let select: (Tab) -> Void
+
+    var body: some View {
+        HStack(spacing: 22) {
+            ForEach(tabs, id: \.self) { tab in
+                Button {
+                    withAnimation(.murmurEase(0.15)) { select(tab) }
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(title(tab))
+                            .font(.manrope(13.5, .semibold))
+                            .foregroundStyle(selected == tab ? Palette.warmInk : Palette.warmInkFaint)
+                            .lineLimit(1)
+                            .fixedSize()
+                        if attention.contains(tab) {
+                            Circle().fill(Palette.sunset).frame(width: 6, height: 6)
+                        }
+                    }
+                    .padding(.bottom, 10)
+                    .overlay(alignment: .bottom) {
+                        Rectangle()
+                            .fill(selected == tab ? Palette.sunsetDeep : .clear)
+                            .frame(height: 2)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer(minLength: 0)
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Palette.warmDivider).frame(height: 1)
+        }
+    }
+}
+
+// MARK: - Keycaps
+
+/// One key of a real shortcut ("⌥", "3", "Space") on a white card: a small warm-grey key with a hairline edge.
+struct WarmKeycap: View {
+    let label: String
+
+    var body: some View {
+        Text(label)
+            .font(.manrope(11, .semibold))
+            .foregroundStyle(Palette.warmInk)
+            .padding(.horizontal, 5)
+            .frame(minWidth: 20, minHeight: 20)
+            .background(Palette.warmRowBorder, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .strokeBorder(Palette.warmDivider, lineWidth: 0.5))
+            .fixedSize()
+    }
+}
+
+// MARK: - Card rows
+
+/// One row of a white card that can lead somewhere (Help's answers, Legal's components): an optional small eyebrow, a
+/// title, a line of text, and whatever sits on the right. With an `action` the whole row is a button with a hover wash
+/// inset from the card's rules; the rule below is drawn unless it's the card's last row.
+struct CardRow<Trailing: View>: View {
+    let title: String
+    let detail: String
+    var eyebrow: String? = nil
+    var isLast = false
+    var action: (() -> Void)? = nil
+    @ViewBuilder var trailing: Trailing
+
+    @State private var hovering = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let action {
+                Button(action: action) { content }
+                    .buttonStyle(.plain)
+                    .onHover { hovering = $0 }
+            } else {
+                content
+            }
+            if !isLast {
+                Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
+            }
+        }
+    }
+
+    private var content: some View {
+        HStack(alignment: .center, spacing: 20) {
+            VStack(alignment: .leading, spacing: 3) {
+                if let eyebrow {
+                    Text(eyebrow.uppercased())
+                        .font(.manrope(9.5, .semibold))
+                        .kerning(0.8)
+                        .foregroundStyle(Palette.warmInkFaint)
+                }
+                Text(title)
+                    .font(.manrope(13, .semibold))
+                    .foregroundStyle(Palette.warmInk)
+                Text(detail)
+                    .font(.manrope(12))
+                    .foregroundStyle(Palette.warmInkSoft)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            trailing
+        }
+        .padding(.vertical, 14)
+        .padding(.horizontal, 10)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(hovering ? Palette.hoverWash : .clear)
+                .padding(.vertical, 4)
+        }
+        .padding(.horizontal, -10)
+        .contentShape(Rectangle())
+        .animation(.murmurEase(0.12), value: hovering)
+    }
+}
+
+/// Where a `CardRow` leads: a quiet name and a chevron — or a ↗ when it opens a web page.
+struct RowDestinationLabel: View {
+    let title: String
+    var external = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title)
+                .font(.manrope(12, .medium))
+                .foregroundStyle(Palette.warmInkSoft)
+            if external {
+                Text("↗")
+                    .font(.manrope(12, .medium))
+                    .foregroundStyle(Palette.warmInkFaint)
+            } else {
+                MurmurIconView(icon: .caret)
+                    .frame(width: 9, height: 9)
+                    .foregroundStyle(Palette.warmInkFaint)
+            }
+        }
+        .fixedSize()
     }
 }

@@ -46,6 +46,18 @@ enum VoiceProfileStore {
         }
     }
 
+    /// A profile made while the word total was counted from capped history
+    /// can sit *ahead* of the lifetime total that's counted now (15,612 vs
+    /// ~14,700 on the first Mac this ran on), which froze both "Next update
+    /// in…" and the refresh itself. Moves its baseline back to the lifetime
+    /// total once, so the next refresh is a normal 250 words away.
+    static func rebaseIfAhead(of totalWords: Int) -> VoiceProfile? {
+        guard var profile = load(), profile.wordCountAtGeneration > totalWords else { return nil }
+        profile.wordCountAtGeneration = totalWords
+        save(profile)
+        return profile
+    }
+
     static func shouldRefresh(totalWords: Int) -> Bool {
         guard totalWords >= minimumWords else { return false }
         guard let existing = load() else { return true }

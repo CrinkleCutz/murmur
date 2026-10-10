@@ -28,7 +28,7 @@ enum PageGroup: CaseIterable {
 
     var items: [Page] {
         switch self {
-        case .capture: return [.home, .insights, .ask, .notetaker, .scratchpad]
+        case .capture: return [.home, .insights, .ask, .notetaker, .scratchpad].filter(\.isAvailable)
         case .teach: return [.dictionary, .training, .style, .appProfiles]
         case .shape: return [.snippets, .templates, .transforms]
         }
@@ -36,6 +36,11 @@ enum PageGroup: CaseIterable {
 }
 
 extension Page {
+    /// False for a page the user can't reach in this build (Notetaker, while `Notetaker.isAvailable` is off) —
+    /// it drops out of the sidebar and every navigation path below refuses it, so no link, notification or
+    /// Help entry can land on it either.
+    var isAvailable: Bool { self != .notetaker || Notetaker.isAvailable }
+
     var group: PageGroup {
         for g in PageGroup.allCases where g.items.contains(self) { return g }
         return .capture
@@ -191,11 +196,13 @@ struct RailView: View {
                     }
                 }
 
+                // Same left edge as the ungrouped rows and the group label —
+                // the label above already shows the grouping; a 4pt nudge
+                // only read as a misalignment.
                 if isOpen {
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(group.items, id: \.self) { item in railRow(item) }
                     }
-                    .padding(.leading, 4)
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             } else {
@@ -310,6 +317,10 @@ struct AppShellRoot: View {
         // back to it.
         .onChange(of: app.pendingNavigateToPage) { _, newValue in
             guard let newValue else { return }
+            guard newValue.isAvailable else {
+                app.pendingNavigateToPage = nil
+                return
+            }
             page = newValue
             expandedGroups.insert(newValue.group)
             app.pendingNavigateToPage = nil
@@ -351,6 +362,12 @@ struct AppShellRoot: View {
                     .foregroundStyle(Palette.danger)
                     .lineLimit(2)
                     .frame(maxWidth: 420, alignment: .trailing)
+            } else if let notice = app.secureInputNotice, app.uiState == .idle {
+                Text(notice)
+                    .font(.manrope(11.5))
+                    .foregroundStyle(Palette.inkSoft)
+                    .lineLimit(2)
+                    .frame(maxWidth: 420, alignment: .trailing)
             }
             // Used to navigate straight to Help — the tooltip even still
             // said "Help" — instead of showing anything notification-
@@ -367,6 +384,8 @@ struct AppShellRoot: View {
                             app.pendingNavigateToPage = .appProfiles
                         case .updateAvailable:
                             break // Re-shows itself via the existing sheet binding if still set.
+                        case .learnedFromEdit:
+                            app.pendingNavigateToPage = .training
                         }
                     }
                 }
@@ -448,8 +467,7 @@ struct AppShellRoot: View {
                     .onPreferenceChange(PopoverContentHeightKey.self) { measuredHeight = $0 }
                 }
             }
-            .background(Color.white)
-            .environment(\.colorScheme, .light)
+            .background(Palette.panel)
         }
 
         private var rows: some View {
@@ -577,7 +595,7 @@ struct AppShellRoot: View {
     }
 
     private func select(_ newPage: Page) {
-        guard newPage != page || overviewGroup != nil else { return }
+        guard newPage.isAvailable, newPage != page || overviewGroup != nil else { return }
         overviewGroup = nil
         withAnimation(.murmurEase(0.15)) { paneSwapping = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
@@ -612,7 +630,7 @@ struct AppShellRoot: View {
         case .scratchpad: ScratchpadPage(app: app)
         case .settings: SettingsPage(app: app)
         case .help: HelpPage(app: app, page: pageBinding)
-        case .legal: LegalPage()
+        case .legal: LegalPage(page: pageBinding)
         }
     }
 }
@@ -669,7 +687,7 @@ private struct RailRow: View {
             .background(
                 RoundedRectangle(cornerRadius: Radius.sm)
                     .fill(selected ? Palette.navActivePill
-                          : (hovering ? Color.black.opacity(0.045) : .clear)))
+                          : (hovering ? Palette.hoverWash : .clear)))
             .contentShape(Rectangle())
         }
         .buttonStyle(PressScaleButtonStyle(scale: 0.97))
@@ -779,7 +797,7 @@ private struct GroupLabelButton: View {
             .padding(.vertical, 5)
             .background(
                 RoundedRectangle(cornerRadius: Radius.sm)
-                    .fill(hovering ? Color.black.opacity(0.04) : .clear))
+                    .fill(hovering ? Palette.hoverWash : .clear))
             .contentShape(Rectangle())
         }
         .buttonStyle(PressScaleButtonStyle(scale: 0.98))

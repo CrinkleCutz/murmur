@@ -1,21 +1,25 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Legal
 //
-// Murmur itself is open-source under the MIT license. Four of its
-// components are also open-source dependencies whose licenses require
-// their text (MIT, Apache-2.0) or their text plus copyright notice
-// (SIL OFL) to be reproduced somewhere in the shipped product. This is
-// that somewhere.
+// Laid out like every other page: small section labels over white cards. Murmur's own license, where its source
+// lives and how it treats your data; then every open-source component shipped inside it, and every speech model it
+// downloads, each with a one-line plain description and its license as a chip. Clicking one opens its license in a
+// sheet — readable, selectable, copyable — instead of the old small boxes that scrolled inside the page's own scroll.
 //
-// Full texts are fetched verbatim from each project's own LICENSE file
-// rather than paraphrased, and the closing `"""` on each is left at column
-// zero on purpose — indenting it to match the surrounding code would make
-// Swift strip that much leading whitespace from every line, corrupting the
-// license text's own internal indentation (Apache-2.0 in particular nests
-// several levels deep).
+// Components ship in the app, so their licenses (and the extra notices some of them carry — WhisperKit's NOTICES,
+// FluidAudio's third-party licenses, Sparkle's external licenses) are reproduced in full, as they require. Models are
+// downloaded, not shipped; their entries give the credit their licenses ask for (CC BY 4.0's attribution and note of
+// changes, the NVIDIA Open Model License's notice, the FunASR license's source and model name) and link the license.
+// Every license here was checked against the project's own LICENSE file or the model's own page on 2026-09-26.
 
 struct LegalPage: View {
+    @Binding var page: Page
+    @State private var shown: LegalEntry?
+
+    static let sourceURL = URL(string: "https://github.com/janisbelozerovs-dev/murmur")!
+
     var body: some View {
         GlassPanelPage {
             // `ThinScrollView`, not a plain `ScrollView` — see
@@ -26,36 +30,45 @@ struct LegalPage: View {
                 VStack(alignment: .leading, spacing: 0) {
                     header
 
-                    Text("Open-source components")
-                        .font(.manrope(13, .semibold))
-                        .foregroundStyle(Palette.warmInk)
-                        .padding(.top, 18)
-
-                    VStack(spacing: 0) {
-                        ForEach(Array(OpenSourceComponent.all.enumerated()), id: \.offset) { index, component in
-                            LicenseItem(component: component)
-                            if index != OpenSourceComponent.all.count - 1 {
-                                Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
-                            }
+                    SettingsSectionLabel(title: "MURMUR")
+                        .padding(.top, 24)
+                    SettingsCard {
+                        entryRow(.murmur)
+                        CardRow(title: "Source code", detail: "Every line of Murmur is public on GitHub.",
+                                action: { NSWorkspace.shared.open(Self.sourceURL) }) {
+                            RowDestinationLabel(title: "GitHub", external: true)
+                        }
+                        CardRow(title: "Your privacy",
+                                detail: "What stays on this Mac, and the few things that go online.",
+                                isLast: true,
+                                action: {
+                                    // Help reads its remembered tab on appear, so this lands on Privacy.
+                                    UserDefaults.standard.set(HelpTab.privacy.rawValue, forKey: "helpTab")
+                                    page = .help
+                                }) {
+                            RowDestinationLabel(title: "Help")
                         }
                     }
-                    .padding(.top, 6)
 
-                    tipBanner
-                        .padding(.top, 18)
+                    SettingsSectionLabel(title: "BUILT WITH", trailing: "Click one to read its license")
+                        .padding(.top, 24)
+                    SettingsCard {
+                        ForEach(Array(LegalEntry.components.enumerated()), id: \.element.id) { index, entry in
+                            entryRow(entry, isLast: index == LegalEntry.components.count - 1)
+                        }
+                    }
+
+                    SettingsSectionLabel(title: "SPEECH MODELS", trailing: "Downloaded to this Mac when needed")
+                        .padding(.top, 24)
+                    SettingsCard {
+                        ForEach(Array(LegalEntry.models.enumerated()), id: \.element.id) { index, entry in
+                            entryRow(entry, isLast: index == LegalEntry.models.count - 1)
+                        }
+                    }
                 }
-                // The mockup caps this page's content at 760px rather
-                // than letting it span the full glass panel — long
-                // license text reads better in a narrower column.
-                .frame(maxWidth: 760, alignment: .leading)
             }
         }
-        // Applied once, here, rather than per `DisclosureGroup` — see
-        // HelpView.swift's own twin of this style for why: macOS's
-        // default indicator sits on the *leading* edge, ahead of the
-        // component name, instead of trailing after the summary like
-        // the mockup.
-        .disclosureGroupStyle(TrailingCaretDisclosureStyle())
+        .sheet(item: $shown) { LicenseSheet(entry: $0) }
     }
 
     private var header: some View {
@@ -64,510 +77,394 @@ struct LegalPage: View {
                 .font(.manrope(22, .medium))
                 .tracking(-0.33)
                 .foregroundStyle(Palette.warmInk)
-            Text("Murmur is open-source under the MIT license, and built with the help "
-                 + "of a few other open-source projects. Their licenses are reproduced "
-                 + "here in full, as each requires.")
+            Text("Murmur's own license, the open-source software it's built with and the speech models it uses — "
+                 + "each license in full, or the credit it asks for.")
                 .font(.manrope(12.5))
                 .foregroundStyle(Palette.warmInkFaint)
-                .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var tipBanner: some View {
-        HStack(alignment: .top, spacing: 8) {
-            MurmurIconView(icon: .help)
-                .frame(width: 13, height: 13)
-                .foregroundStyle(Palette.warmInkSoft)
-                .padding(.top, 1)
-            Text("Murmur's own source is on GitHub under the MIT license. The licenses "
-                 + "above cover the third-party components listed, each used under "
-                 + "terms that permit open-source redistribution.")
-                .font(.manrope(12.5))
-                .lineSpacing(3)
-                .foregroundStyle(Palette.warmInkSoft)
+    private func entryRow(_ entry: LegalEntry, isLast: Bool = false) -> some View {
+        CardRow(title: entry.name, detail: entry.purpose, isLast: isLast, action: { shown = entry }) {
+            HStack(spacing: 8) {
+                LicenseChip(text: entry.license)
+                MurmurIconView(icon: .caret)
+                    .frame(width: 9, height: 9)
+                    .foregroundStyle(Palette.warmInkFaint)
+            }
+            .fixedSize()
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
-private struct LicenseItem: View {
-    let component: OpenSourceComponent
-    @State private var expanded = false
+/// A license's short name, as a quiet grey chip.
+private struct LicenseChip: View {
+    let text: String
 
     var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text(component.copyright)
-                    .font(.manrope(11.5, .medium))
-                    .foregroundStyle(Palette.warmInkSoft)
-                ThinScrollView {
-                    Text(component.fullText)
-                        .font(.system(size: 10.5, design: .monospaced))
-                        .foregroundStyle(Palette.warmInkSoft)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                }
-                .frame(maxHeight: 220)
-                .background(Palette.homeGradientBottom, in: RoundedRectangle(cornerRadius: Radius.sm))
-                .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmRowBorder, lineWidth: 1))
-            }
-            .padding(.top, 4)
-            .padding(.bottom, 16)
-        } label: {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 8) {
-                    Text(component.name)
-                        .font(.manrope(13.5, .semibold))
-                        .foregroundStyle(Palette.warmInk)
-                    Text(component.license)
-                        .font(.manrope(11))
-                        .foregroundStyle(Palette.warmInkSoft)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 2)
-                        .background(Palette.warmRowBorder, in: Capsule())
-                        .overlay(Capsule().stroke(Palette.warmDivider, lineWidth: 1))
-                }
-                Text(component.purpose)
-                    .font(.manrope(12))
-                    .foregroundStyle(Palette.warmInkSoft)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 10)
+        Text(text)
+            .font(.manrope(11, .medium))
+            .foregroundStyle(Palette.warmInkSoft)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Palette.warmRowBorder, in: Capsule())
+            .fixedSize()
     }
 }
 
-/// Moves `DisclosureGroup`'s indicator to the trailing edge of its label,
-/// matching the mockup's own summary layout (name, chip, then the
-/// chevron) — see HelpView.swift's own twin of this for the fuller note;
-/// kept as a separate copy here since `private` there scopes it to that
-/// file.
-private struct TrailingCaretDisclosureStyle: DisclosureGroupStyle {
-    func makeBody(configuration: Configuration) -> some View {
+/// One entry's license, full size: its name and chip, what it is, links to the project and the license, the text
+/// itself (monospaced, selectable, scrolling inside the sheet), Copy, and Done (Return or Esc).
+private struct LicenseSheet: View {
+    let entry: LegalEntry
+    @Environment(\.dismiss) private var dismiss
+    @State private var copied = false
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button {
-                withAnimation(.murmurEase(0.15)) { configuration.isExpanded.toggle() }
-            } label: {
-                HStack(alignment: .top, spacing: 8) {
-                    configuration.label
-                    Spacer(minLength: 8)
-                    MurmurIconView(icon: .caret)
-                        .frame(width: 9, height: 9)
-                        .foregroundStyle(Palette.warmInkFainter)
-                        .padding(.top, 4)
-                        .rotationEffect(.degrees(configuration.isExpanded ? 90 : 0))
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(entry.name)
+                    .font(.manrope(16, .semibold))
+                    .foregroundStyle(Palette.warmInk)
+                LicenseChip(text: entry.license)
+                Spacer(minLength: 0)
+            }
+            Text(entry.purpose)
+                .font(.manrope(12))
+                .foregroundStyle(Palette.warmInkSoft)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 4)
+            if !entry.links.isEmpty {
+                HStack(spacing: 16) {
+                    ForEach(Array(entry.links.enumerated()), id: \.offset) { _, link in
+                        Button { NSWorkspace.shared.open(link.url) } label: {
+                            RowDestinationLabel(title: link.title, external: true)
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
-                .contentShape(Rectangle())
+                .padding(.top, 8)
             }
-            .buttonStyle(.plain)
-
-            if configuration.isExpanded {
-                configuration.content
+            ThinScrollView {
+                Text(entry.text)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Palette.warmInkSoft)
+                    .lineSpacing(2)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
             }
+            .frame(height: 320)
+            .background(Palette.homeGradientBottom, in: RoundedRectangle(cornerRadius: Radius.sm))
+            .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmRowBorder, lineWidth: 1))
+            .padding(.top, 16)
+            HStack(spacing: 16) {
+                Button(copied ? "Copied" : "Copy license") {
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(entry.text, forType: .string)
+                    copied = true
+                }
+                .buttonStyle(.plain)
+                .font(.manrope(13, .medium))
+                .foregroundStyle(Palette.warmInkSoft)
+                Spacer()
+                Button { dismiss() } label: {
+                    Text("Done")
+                        .font(.manrope(13, .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 18)
+                        .frame(height: 34)
+                        .background(Palette.navActivePill, in: RoundedRectangle(cornerRadius: Radius.md))
+                }
+                .buttonStyle(PressScaleButtonStyle(scale: 0.97))
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.top, 18)
         }
+        .padding(22)
+        .frame(width: 640)
+        .background(Palette.panel)
+        .onExitCommand { dismiss() }
     }
 }
 
-private struct OpenSourceComponent {
+// MARK: - Entries
+
+struct LegalEntry: Identifiable {
+    var id: String { name }
     let name: String
     let purpose: String
+    /// The chip: the license's short name.
     let license: String
-    let copyright: String
-    let fullText: String
+    /// The license in full, or — for a downloaded model — the credit its license asks for.
+    let text: String
+    var links: [(title: String, url: URL)] = []
 
-    static let all: [OpenSourceComponent] = [
-        OpenSourceComponent(
+    private static func link(_ title: String, _ url: String) -> (title: String, url: URL) {
+        (title, URL(string: url)!)
+    }
+
+    private static let ccBy = link("CC BY 4.0", "https://creativecommons.org/licenses/by/4.0/")
+    private static let apache = link("Apache 2.0", "https://www.apache.org/licenses/LICENSE-2.0")
+
+    static let murmur = LegalEntry(
+        name: "Murmur",
+        purpose: "Copyright © 2026 Murmur contributors. Free and open source under the MIT License.",
+        license: "MIT",
+        text: LegalTexts.murmurLicense,
+        links: [link("github.com/janisbelozerovs-dev/murmur", "https://github.com/janisbelozerovs-dev/murmur")])
+
+    static let components: [LegalEntry] = [
+        LegalEntry(
             name: "WhisperKit",
-            purpose: "One of Murmur's on-device speech recognition engines — runs "
-                + "Whisper models via Core ML on the Neural Engine.",
+            purpose: "Runs Whisper speech models on the Neural Engine.",
             license: "MIT",
-            copyright: "Copyright (c) 2024 argmax, inc.",
-            fullText: mitLicense(copyright: "Copyright (c) 2024 argmax, inc.")),
-        OpenSourceComponent(
+            text: LegalTexts.mit(copyright: "Copyright (c) 2024 argmax, inc.")
+                + "\n\n" + String(repeating: "=", count: 80) + "\n\n" + LegalTexts.whisperKitNotices,
+            links: [link("github.com/argmaxinc/WhisperKit", "https://github.com/argmaxinc/WhisperKit")]),
+        LegalEntry(
             name: "whisper.cpp",
-            purpose: "Runs Whisper models via Metal on the GPU, as an alternative "
-                + "to the WhisperKit engine above.",
+            purpose: "Runs Whisper speech models on the graphics chip.",
             license: "MIT",
-            copyright: "Copyright (c) 2023-2026 The ggml authors",
-            fullText: mitLicense(copyright: "Copyright (c) 2023-2026 The ggml authors")),
-        OpenSourceComponent(
+            text: LegalTexts.mit(copyright: "Copyright (c) 2023-2026 The ggml authors"),
+            links: [link("github.com/ggml-org/whisper.cpp", "https://github.com/ggml-org/whisper.cpp")]),
+        LegalEntry(
             name: "FluidAudio",
-            purpose: "Murmur's fastest recognition engine — runs NVIDIA's Parakeet "
-                + "TDT model via Core ML on the Neural Engine.",
-            license: "Apache-2.0",
-            copyright: "Copyright 2025 FluidInference",
-            fullText: apacheLicense),
-        OpenSourceComponent(
+            purpose: Notetaker.isAvailable
+                ? "Runs Parakeet and Nemotron, and tells speakers apart in Notetaker."
+                : "Runs Parakeet and Nemotron.",
+            license: "Apache 2.0",
+            text: LegalTexts.apacheLicense
+                + "\n\n" + String(repeating: "=", count: 80) + "\nTHIRD-PARTY LICENSES INCLUDED IN FLUIDAUDIO\n"
+                + String(repeating: "=", count: 80) + "\n\n" + LegalTexts.fluidAudioNemoTextProcessing
+                + "\n\n" + String(repeating: "-", count: 80) + "\nfastcluster\n\n" + LegalTexts.fluidAudioFastcluster
+                + "\n\n" + String(repeating: "-", count: 80) + "\nVBx\n\n" + LegalTexts.fluidAudioVBx,
+            links: [link("github.com/FluidInference/FluidAudio", "https://github.com/FluidInference/FluidAudio")]),
+        LegalEntry(
             name: "sherpa-onnx",
-            purpose: "Murmur's newest recognition engine — runs SenseVoice (a "
-                + "multilingual speech model) via ONNX Runtime on the CPU, no Neural "
-                + "Engine involved. Vendored as a prebuilt binary framework at "
-                + "Vendor/sherpa-onnx.xcframework.",
-            license: "Apache-2.0",
-            copyright: "Copyright (c) 2023 Xiaomi Corporation",
-            fullText: apacheLicense),
-        OpenSourceComponent(
+            purpose: "Runs the experimental engine that uses only the processor.",
+            license: "Apache 2.0",
+            text: "Copyright (c) 2023 Xiaomi Corporation\n\n" + LegalTexts.apacheLicense,
+            links: [link("github.com/k2-fsa/sherpa-onnx", "https://github.com/k2-fsa/sherpa-onnx")]),
+        LegalEntry(
             name: "ONNX Runtime",
-            purpose: "The inference engine sherpa-onnx above runs on. Vendored "
-                + "alongside it inside Vendor/sherpa-onnx.xcframework.",
+            purpose: "What sherpa-onnx runs on.",
             license: "MIT",
-            copyright: "Copyright (c) Microsoft Corporation",
-            fullText: mitLicense(copyright: "Copyright (c) Microsoft Corporation")),
-        OpenSourceComponent(
+            text: LegalTexts.mit(copyright: "Copyright (c) Microsoft Corporation"),
+            links: [link("github.com/microsoft/onnxruntime", "https://github.com/microsoft/onnxruntime")]),
+        LegalEntry(
             name: "Harper",
-            purpose: "The fast, deterministic grammar and style checker that runs "
-                + "alongside Apple Intelligence on every dictation.",
-            license: "Apache-2.0",
-            copyright: "Copyright 2024 Elijah Potter",
-            fullText: apacheLicense),
-        OpenSourceComponent(
-            name: "Manrope",
-            purpose: "The typeface used throughout Murmur's interface.",
-            license: "SIL OFL 1.1",
-            copyright: "Copyright 2018 The Manrope Project Authors "
-                + "(https://github.com/sharanda/manrope)",
-            fullText: manropeOFL),
-        OpenSourceComponent(
-            name: "Phosphor Icons",
-            purpose: "Every icon throughout Murmur's interface — not linked in as a "
-                + "package (Phosphor ships no Swift target), so each icon's path data "
-                + "is reproduced directly in MurmurIcons.swift instead.",
+            purpose: "Checks grammar and spelling in English dictation.",
+            license: "Apache 2.0",
+            text: LegalTexts.harperLicense,
+            links: [link("github.com/Automattic/harper", "https://github.com/Automattic/harper")]),
+        LegalEntry(
+            name: "MLX",
+            purpose: "Runs the translation models on the graphics chip.",
             license: "MIT",
-            copyright: "Copyright (c) 2023 Phosphor Icons",
-            fullText: mitLicense(copyright: "Copyright (c) 2023 Phosphor Icons")),
+            text: "MLX\n\n" + LegalTexts.mit(copyright: "Copyright © 2023 Apple Inc.")
+                + "\n\n" + String(repeating: "-", count: 80) + "\nMLX Swift\n\n"
+                + LegalTexts.mit(copyright: "Copyright (c) 2023 ml-explore")
+                + "\n\n" + String(repeating: "-", count: 80) + "\nMLX Swift LM\n\n"
+                + LegalTexts.mit(copyright: "Copyright (c) 2024 ml-explore"),
+            links: [link("github.com/ml-explore/mlx-swift", "https://github.com/ml-explore/mlx-swift")]),
+        LegalEntry(
+            name: "swift-transformers",
+            purpose: "Reads the translation models' vocabularies.",
+            license: "Apache 2.0 · MIT",
+            text: "swift-transformers, swift-jinja and swift-huggingface by Hugging Face, and Swift Crypto, Swift "
+                + "Collections, Swift Numerics and SwiftASN1 by Apple Inc. and the Swift project authors, are "
+                + "licensed under the Apache License, Version 2.0.\n\n" + LegalTexts.apacheLicense
+                + "\n\n" + String(repeating: "-", count: 80) + "\nyyjson\n\n"
+                + LegalTexts.mit(copyright: "Copyright (c) 2020 YaoYuan <ibireme@gmail.com>")
+                + "\n\n" + String(repeating: "-", count: 80) + "\nEventSource\n\n"
+                + LegalTexts.mit(copyright: "Copyright 2025 Mattt (https://mat.tt)"),
+            links: [link("github.com/huggingface/swift-transformers", "https://github.com/huggingface/swift-transformers")]),
+        LegalEntry(
+            name: "Sparkle",
+            purpose: "Finds and installs updates in official builds.",
+            license: "MIT",
+            text: LegalTexts.sparkleLicense,
+            links: [link("sparkle-project.org", "https://sparkle-project.org")]),
+        LegalEntry(
+            name: "Manrope",
+            purpose: "The typeface throughout Murmur.",
+            license: "SIL OFL 1.1",
+            text: LegalTexts.manropeOFL,
+            links: [link("github.com/sharanda/manrope", "https://github.com/sharanda/manrope")]),
+        LegalEntry(
+            name: "Phosphor Icons",
+            purpose: "Every icon in Murmur.",
+            license: "MIT",
+            text: LegalTexts.mit(copyright: "Copyright (c) 2023 Phosphor Icons"),
+            links: [link("phosphoricons.com", "https://phosphoricons.com")]),
     ]
+
+    static let models: [LegalEntry] = [
+        LegalEntry(
+            name: "Gemma 4",
+            purpose: "By Google. Translate into, if you download it.",
+            license: "Apache 2.0",
+            text: """
+                Gemma 4 E4B (instruction-tuned) by Google, licensed under the Apache License, Version 2.0.
+
+                Murmur uses the 4-bit MLX version converted by the MLX Community: \
+                https://huggingface.co/mlx-community/gemma-4-e4b-it-4bit
+                """,
+            links: [link("Google's model page", "https://huggingface.co/google/gemma-4-E4B-it"), apache]),
+        LegalEntry(
+            name: "EuroLLM",
+            purpose: "By the EuroLLM project. Translate into for Latvian, if you download it.",
+            license: "Apache 2.0",
+            text: """
+                EuroLLM-9B-Instruct by the EuroLLM project (Unbabel, Instituto Superior Técnico, the University of \
+                Edinburgh and partners), licensed under the Apache License, Version 2.0.
+
+                Murmur uses the 4-bit MLX version converted by stelterlab: \
+                https://huggingface.co/stelterlab/EuroLLM-9B-Instruct-MLX-4bit
+                """,
+            links: [link("Model page", "https://huggingface.co/utter-project/EuroLLM-9B-Instruct"), apache]),
+        LegalEntry(
+            name: "Whisper",
+            purpose: "By OpenAI. The Whisper and whisper.cpp engines.",
+            license: "Apache 2.0 · MIT",
+            text: """
+                Whisper speech recognition models by OpenAI.
+
+                Base, Small and Large v3 are licensed under the Apache License, Version 2.0; Large v3 Turbo under \
+                the MIT License.
+
+                The Whisper engine uses Core ML versions converted by Argmax, Inc. (MIT License): \
+                https://huggingface.co/argmaxinc/whisperkit-coreml
+
+                The whisper.cpp engine uses ggml versions converted by the whisper.cpp authors (MIT License): \
+                https://huggingface.co/ggerganov/whisper.cpp
+                """,
+            links: [link("huggingface.co/openai", "https://huggingface.co/openai"), apache]),
+        LegalEntry(
+            name: "Distil-Whisper",
+            purpose: "By Hugging Face. Distil Large v3 in the Whisper engine.",
+            license: "MIT",
+            text: """
+                Distil-Whisper distil-large-v3 by Hugging Face, a distilled version of OpenAI's Whisper, licensed \
+                under the MIT License.
+
+                Murmur uses the Core ML version converted by Argmax, Inc. (MIT License).
+                """,
+            links: [link("huggingface.co/distil-whisper", "https://huggingface.co/distil-whisper/distil-large-v3")]),
+        LegalEntry(
+            name: "Whisper Large v3 for Latvian",
+            purpose: "By AiLab IMCS, University of Latvia. The Latvian model in whisper.cpp.",
+            license: "Apache 2.0",
+            text: """
+                whisper-large-v3-lv-late-cv19, OpenAI's Whisper Large v3 fine-tuned for Latvian by the Artificial \
+                Intelligence Laboratory (AiLab) of the Institute of Mathematics and Computer Science, University of \
+                Latvia. Licensed under the Apache License, Version 2.0.
+
+                Murmur uses its ggml (8-bit) version from the same page.
+                """,
+            links: [link("Model page", "https://huggingface.co/AiLab-IMCS-UL/whisper-large-v3-lv-late-cv19"), apache]),
+        LegalEntry(
+            name: "Parakeet",
+            purpose: Notetaker.isAvailable
+                ? "By NVIDIA. The Parakeet engine, Notetaker, and vocabulary boosting."
+                : "By NVIDIA. The Parakeet engine and vocabulary boosting.",
+            license: "CC BY 4.0",
+            text: """
+                Parakeet TDT 0.6B v2 and v3, and Parakeet CTC 110M and 0.6B, by NVIDIA. Licensed under the Creative \
+                Commons Attribution 4.0 International License (CC BY 4.0): \
+                https://creativecommons.org/licenses/by/4.0/
+
+                Changes: converted to Core ML by Fluid Inference — https://huggingface.co/FluidInference
+                """,
+            links: [link("NVIDIA's model page", "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3"), ccBy]),
+        LegalEntry(
+            name: "Nemotron Speech Streaming",
+            purpose: "By NVIDIA. The Nemotron model in the Parakeet engine.",
+            license: "NVIDIA Open Model License",
+            text: """
+                Licensed by NVIDIA Corporation under the NVIDIA Open Model License.
+
+                nemotron-speech-streaming-en-0.6b by NVIDIA: \
+                https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/
+
+                Changes: converted to Core ML by Fluid Inference — \
+                https://huggingface.co/FluidInference/nemotron-speech-streaming-en-0.6b-coreml
+                """,
+            links: [link("License", "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/")]),
+        LegalEntry(
+            name: "Canary 180M Flash",
+            purpose: "By NVIDIA. A model in the sherpa-onnx engine.",
+            license: "CC BY 4.0",
+            text: """
+                canary-180m-flash by NVIDIA. Licensed under the Creative Commons Attribution 4.0 International \
+                License (CC BY 4.0): https://creativecommons.org/licenses/by/4.0/
+
+                Changes: converted to ONNX (8-bit) by the sherpa-onnx project — https://github.com/k2-fsa/sherpa-onnx
+                """,
+            links: [link("Model page", "https://huggingface.co/nvidia/canary-180m-flash"), ccBy]),
+        LegalEntry(
+            name: "SenseVoice Small",
+            purpose: "By FunAudioLLM, Alibaba Group. A model in the sherpa-onnx engine.",
+            license: "FunASR Model License",
+            text: """
+                SenseVoiceSmall, by FunAudioLLM (Tongyi Lab, Alibaba Group) — https://huggingface.co/FunAudioLLM/SenseVoiceSmall
+
+                Used under the FunASR Model Open Source License Agreement, version 1.1, Copyright (C) 2023-2028 \
+                Alibaba Group: https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE
+
+                Changes: converted to ONNX (8-bit) by the sherpa-onnx project — https://github.com/k2-fsa/sherpa-onnx
+                """,
+            links: [link("License", "https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE")]),
+        LegalEntry(
+            name: "Fun-ASR-Nano",
+            purpose: "By FunAudioLLM, Alibaba Group. A model in the sherpa-onnx engine.",
+            license: "Apache 2.0",
+            text: """
+                Fun-ASR-Nano by FunAudioLLM (Tongyi Lab, Alibaba Group), licensed under the Apache License, \
+                Version 2.0.
+
+                Changes: converted to ONNX (8-bit) by the sherpa-onnx project — https://github.com/k2-fsa/sherpa-onnx
+                """,
+            links: [link("Model page", "https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-2512"), apache]),
+        LegalEntry(
+            name: "Qwen3-ASR",
+            purpose: "By the Qwen team, Alibaba Cloud. A model in the sherpa-onnx engine.",
+            license: "Apache 2.0",
+            text: """
+                Qwen3-ASR-0.6B by the Qwen team, Alibaba Cloud, licensed under the Apache License, Version 2.0.
+
+                Changes: converted to ONNX (8-bit) by the sherpa-onnx project — https://github.com/k2-fsa/sherpa-onnx
+                """,
+            links: [link("Model page", "https://huggingface.co/Qwen/Qwen3-ASR-0.6B"), apache]),
+        LegalEntry(
+            name: "Silero VAD",
+            purpose: "By Silero. Tells your speech from silence.",
+            license: "MIT",
+            text: """
+                Silero VAD by the Silero team, licensed under the MIT License — https://github.com/snakers4/silero-vad
+
+                Changes: converted to Core ML by Fluid Inference — https://huggingface.co/FluidInference/silero-vad-coreml
+                """,
+            links: [link("github.com/snakers4/silero-vad", "https://github.com/snakers4/silero-vad")]),
+        LegalEntry(
+            name: "Speaker recognition",
+            purpose: "By pyannote, WeSpeaker and BUT Speech@FIT. Tells speakers apart in Notetaker.",
+            license: "CC BY 4.0",
+            text: """
+                Notetaker's speaker models are derived from pyannote's speaker-diarization-community-1 \
+                (https://huggingface.co/pyannote/speaker-diarization-community-1), with WeSpeaker speaker \
+                embeddings and PLDA parameters from Brno University of Technology / BUT Speech@FIT. Licensed under \
+                the Creative Commons Attribution 4.0 International License (CC BY 4.0): \
+                https://creativecommons.org/licenses/by/4.0/
+
+                Changes: modified Core ML conversions by Fluid Inference — the PyTorch components converted to Core \
+                ML with fixed input shapes and mixed-precision storage, and the FBank frontend separated from the \
+                embedding backend. https://huggingface.co/FluidInference/speaker-diarization-coreml
+                """,
+            links: [link("Model page", "https://huggingface.co/FluidInference/speaker-diarization-coreml"), ccBy]),
+    ].filter { $0.name != "Speaker recognition" || Notetaker.isAvailable }
 }
-
-/// WhisperKit and whisper.cpp are both MIT with only the copyright line
-/// differing — one template instead of duplicating the same ~20 lines twice.
-private func mitLicense(copyright: String) -> String {
-    """
-\(copyright)
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-"""
-}
-
-private let apacheLicense = """
-                                 Apache License
-                           Version 2.0, January 2004
-                        http://www.apache.org/licenses/
-
-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
-
-   1. Definitions.
-
-      "License" shall mean the terms and conditions for use, reproduction,
-      and distribution as defined by Sections 1 through 9 of this document.
-
-      "Licensor" shall mean the copyright owner or entity authorized by
-      the copyright owner that is granting the License.
-
-      "Legal Entity" shall mean the union of the acting entity and all
-      other entities that control, are controlled by, or are under common
-      control with that entity. For the purposes of this definition,
-      "control" means (i) the power, direct or indirect, to cause the
-      direction or management of such entity, whether by contract or
-      otherwise, or (ii) ownership of fifty percent (50%) or more of the
-      outstanding shares, or (iii) beneficial ownership of such entity.
-
-      "You" (or "Your") shall mean an individual or Legal Entity
-      exercising permissions granted by this License.
-
-      "Source" form shall mean the preferred form for making modifications,
-      including but not limited to software source code, documentation
-      source, and configuration files.
-
-      "Object" form shall mean any form resulting from mechanical
-      transformation or translation of a Source form, including but
-      not limited to compiled object code, generated documentation,
-      and conversions to other media types.
-
-      "Work" shall mean the work of authorship, whether in Source or
-      Object form, made available under the License, as indicated by a
-      copyright notice that is included in or attached to the work
-      (an example is provided in the Appendix below).
-
-      "Derivative Works" shall mean any work, whether in Source or Object
-      form, that is based on (or derived from) the Work and for which the
-      editorial revisions, annotations, elaborations, or other modifications
-      represent, as a whole, an original work of authorship. For the purposes
-      of this License, Derivative Works shall not include works that remain
-      separable from, or merely link (or bind by name) to the interfaces of,
-      the Work and Derivative Works thereof.
-
-      "Contribution" shall mean any work of authorship, including
-      the original version of the Work and any modifications or additions
-      to that Work or Derivative Works thereof, that is intentionally
-      submitted to Licensor for inclusion in the Work by the copyright owner
-      or by an individual or Legal Entity authorized to submit on behalf of
-      the copyright owner. For the purposes of this definition, "submitted"
-      means any form of electronic, verbal, or written communication sent
-      to the Licensor or its representatives, including but not limited to
-      communication on electronic mailing lists, source code control systems,
-      and issue tracking systems that are managed by, or on behalf of, the
-      Licensor for the purpose of discussing and improving the Work, but
-      excluding communication that is conspicuously marked or otherwise
-      designated in writing by the copyright owner as "Not a Contribution."
-
-      "Contributor" shall mean Licensor and any individual or Legal Entity
-      on behalf of whom a Contribution has been received by Licensor and
-      subsequently incorporated within the Work.
-
-   2. Grant of Copyright License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      copyright license to reproduce, prepare Derivative Works of,
-      publicly display, publicly perform, sublicense, and distribute the
-      Work and such Derivative Works in Source or Object form.
-
-   3. Grant of Patent License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      (except as stated in this section) patent license to make, have made,
-      use, offer to sell, sell, import, and otherwise transfer the Work,
-      where such license applies only to those patent claims licensable
-      by such Contributor that are necessarily infringed by their
-      Contribution(s) alone or by combination of their Contribution(s)
-      with the Work to which such Contribution(s) was submitted. If You
-      institute patent litigation against any entity (including a
-      cross-claim or counterclaim in a lawsuit) alleging that the Work
-      or a Contribution incorporated within the Work constitutes direct
-      or contributory patent infringement, then any patent licenses
-      granted to You under this License for that Work shall terminate
-      as of the date such litigation is filed.
-
-   4. Redistribution. You may reproduce and distribute copies of the
-      Work or Derivative Works thereof in any medium, with or without
-      modifications, and in Source or Object form, provided that You
-      meet the following conditions:
-
-      (a) You must give any other recipients of the Work or
-          Derivative Works a copy of this License; and
-
-      (b) You must cause any modified files to carry prominent notices
-          stating that You changed the files; and
-
-      (c) You must retain, in the Source form of any Derivative Works
-          that You distribute, all copyright, patent, trademark, and
-          attribution notices from the Source form of the Work,
-          excluding those notices that do not pertain to any part of
-          the Derivative Works; and
-
-      (d) If the Work includes a "NOTICE" text file as part of its
-          distribution, then any Derivative Works that You distribute must
-          include a readable copy of the attribution notices contained
-          within such NOTICE file, excluding those notices that do not
-          pertain to any part of the Derivative Works, in at least one
-          of the following places: within a NOTICE text file distributed
-          as part of the Derivative Works; within the Source form or
-          documentation, if provided along with the Derivative Works; or,
-          within a display generated by the Derivative Works, if and
-          wherever such third-party notices normally appear. The contents
-          of the NOTICE file are for informational purposes only and
-          do not modify the License. You may add Your own attribution
-          notices within Derivative Works that You distribute, alongside
-          or as an addendum to the NOTICE text from the Work, provided
-          that such additional attribution notices cannot be construed
-          as modifying the License.
-
-      You may add Your own copyright statement to Your modifications and
-      may provide additional or different license terms and conditions
-      for use, reproduction, or distribution of Your modifications, or
-      for any such Derivative Works as a whole, provided Your use,
-      reproduction, and distribution of the Work otherwise complies with
-      the conditions stated in this License.
-
-   5. Submission of Contributions. Unless You explicitly state otherwise,
-      any Contribution intentionally submitted for inclusion in the Work
-      by You to the Licensor shall be under the terms and conditions of
-      this License, without any additional terms or conditions.
-      Notwithstanding the above, nothing herein shall supersede or modify
-      the terms of any separate license agreement you may have executed
-      with Licensor regarding such Contributions.
-
-   6. Trademarks. This License does not grant permission to use the trade
-      names, trademarks, service marks, or product names of the Licensor,
-      except as required for reasonable and customary use in describing the
-      origin of the Work and reproducing the content of the NOTICE file.
-
-   7. Disclaimer of Warranty. Unless required by applicable law or
-      agreed to in writing, Licensor provides the Work (and each
-      Contributor provides its Contributions) on an "AS IS" BASIS,
-      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-      implied, including, without limitation, any warranties or conditions
-      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
-      PARTICULAR PURPOSE. You are solely responsible for determining the
-      appropriateness of using or redistributing the Work and assume any
-      risks associated with Your exercise of permissions under this License.
-
-   8. Limitation of Liability. In no event and under no legal theory,
-      whether in tort (including negligence), contract, or otherwise,
-      unless required by applicable law (such as deliberate and grossly
-      negligent acts) or agreed to in writing, shall any Contributor be
-      liable to You for damages, including any direct, indirect, special,
-      incidental, or consequential damages of any character arising as a
-      result of this License or out of the use or inability to use the
-      Work (including but not limited to damages for loss of goodwill,
-      work stoppage, computer failure or malfunction, or any and all
-      other commercial damages or losses), even if such Contributor
-      has been advised of the possibility of such damages.
-
-   9. Accepting Warranty or Additional Liability. While redistributing
-      the Work or Derivative Works thereof, You may choose to offer,
-      and charge a fee for, acceptance of support, warranty, indemnity,
-      or other liability obligations and/or rights consistent with this
-      License. However, in accepting such obligations, You may act only
-      on Your own behalf and on Your sole responsibility, not on behalf
-      of any other Contributor, and only if You agree to indemnify,
-      defend, and hold each Contributor harmless for any liability
-      incurred by, or claims asserted against, such Contributor by reason
-      of your accepting any such warranty or additional liability.
-
-   END OF TERMS AND CONDITIONS
-
-   APPENDIX: How to apply the Apache License to your work.
-
-      To apply the Apache License to your work, attach the following
-      boilerplate notice, with the fields enclosed by brackets "[]"
-      replaced with your own identifying information. (Don't include
-      the brackets!)  The text should be enclosed in the appropriate
-      comment syntax for the file format. We also recommend that a
-      file or class name and description of purpose be included on the
-      same "printed page" as the copyright notice for easier
-      identification within third-party archives.
-
-   Copyright 2024 Elijah Potter
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-"""
-
-private let manropeOFL = """
-Copyright 2018 The Manrope Project Authors (https://github.com/sharanda/manrope)
-
-This Font Software is licensed under the SIL Open Font License, Version 1.1.
-This license is copied below, and is also available with a FAQ at:
-http://scripts.sil.org/OFL
-
-
------------------------------------------------------------
-SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
------------------------------------------------------------
-
-PREAMBLE
-The goals of the Open Font License (OFL) are to stimulate worldwide
-development of collaborative font projects, to support the font creation
-efforts of academic and linguistic communities, and to provide a free and
-open framework in which fonts may be shared and improved in partnership
-with others.
-
-The OFL allows the licensed fonts to be used, studied, modified and
-redistributed freely as long as they are not sold by themselves. The
-fonts, including any derivative works, can be bundled, embedded,
-redistributed and/or sold with any software provided that any reserved
-names are not used by derivative works. The fonts and derivatives,
-however, cannot be released under any other type of license. The
-requirement for fonts to remain under this license does not apply
-to any document created using the fonts or their derivatives.
-
-DEFINITIONS
-"Font Software" refers to the set of files released by the Copyright
-Holder(s) under this license and clearly marked as such. This may
-include source files, build scripts and documentation.
-
-"Reserved Font Name" refers to any names specified as such after the
-copyright statement(s).
-
-"Original Version" refers to the collection of Font Software components as
-distributed by the Copyright Holder(s).
-
-"Modified Version" refers to any derivative made by adding to, deleting,
-or substituting -- in part or in whole -- any of the components of the
-Original Version, by changing formats or by porting the Font Software to a
-new environment.
-
-"Author" refers to any designer, engineer, programmer, technical
-writer or other person who contributed to the Font Software.
-
-PERMISSION & CONDITIONS
-Permission is hereby granted, free of charge, to any person obtaining
-a copy of the Font Software, to use, study, copy, merge, embed, modify,
-redistribute, and sell modified and unmodified copies of the Font
-Software, subject to the following conditions:
-
-1) Neither the Font Software nor any of its individual components,
-in Original or Modified Versions, may be sold by itself.
-
-2) Original or Modified Versions of the Font Software may be bundled,
-redistributed and/or sold with any software, provided that each copy
-contains the above copyright notice and this license. These can be
-included either as stand-alone text files, human-readable headers or
-in the appropriate machine-readable metadata fields within text or
-binary files as long as those fields can be easily viewed by the user.
-
-3) No Modified Version of the Font Software may use the Reserved Font
-Name(s) unless explicit written permission is granted by the corresponding
-Copyright Holder. This restriction only applies to the primary font name as
-presented to the users.
-
-4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
-Software shall not be used to promote, endorse or advertise any
-Modified Version, except to acknowledge the contribution(s) of the
-Copyright Holder(s) and the Author(s) or with their explicit written
-permission.
-
-5) The Font Software, modified or unmodified, in part or in whole,
-must be distributed entirely under this license, and must not be
-distributed under any other license. The requirement for fonts to
-remain under this license does not apply to any document created
-using the Font Software.
-
-TERMINATION
-This license becomes null and void if any of the above conditions are
-not met.
-
-DISCLAIMER
-THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
-OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
-COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
-DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
-OTHER DEALINGS IN THE FONT SOFTWARE.
-"""

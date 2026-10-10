@@ -33,7 +33,13 @@ final class Transcriber {
     func transcribe(fileAt url: URL, biasTerms: [String] = []) async throws -> String {
         try await ensureModelInstalled()
 
-        let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
+        // The same preset as always, plus each word's confidence — for the unsure-word name fix. Every other option
+        // is copied from the preset, so recognition itself is unchanged.
+        let preset = SpeechTranscriber.Preset.transcription
+        let transcriber = SpeechTranscriber(
+            locale: locale, transcriptionOptions: preset.transcriptionOptions,
+            reportingOptions: preset.reportingOptions,
+            attributeOptions: preset.attributeOptions.union([.transcriptionConfidence]))
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         if !biasTerms.isEmpty {
             let context = AnalysisContext()
@@ -54,7 +60,21 @@ final class Transcriber {
             await analyzer.cancelAndFinishNow()
         }
 
-        return String((try await transcript).characters)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let attributed = try await transcript
+        let text = String(attributed.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard UnsureWordFix.isEnabled, locale.language.languageCode?.identifier == "en" else { return text }
+        // Each run of the transcript carries one confidence; every word in it gets that value.
+        var pieces: [(text: String, p: Float)] = []
+        for run in attributed.runs {
+            let confidence = Float(run[AttributeScopes.SpeechAttributes.ConfidenceAttribute.self] ?? 1)
+            for word in String(attributed[run.range].characters).split(whereSeparator: \.isWhitespace) {
+                pieces.append((" " + word, confidence))
+            }
+        }
+        guard let fixed = UnsureWordFix.fix(text, words: UnsureWordFix.words(fromTokens: pieces), terms: biasTerms)
+        else { return text }
+        dictationLog.info("Apple: fixed \(fixed.changes.count) unsure name(s)")
+        NameFixLog.record(fixed.changes, engine: "Apple")
+        return fixed.text
     }
 }

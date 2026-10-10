@@ -1,22 +1,19 @@
 import AppKit
+import ServiceManagement
 import Speech
 import SwiftUI
+import Translation
 
 // MARK: - Settings
 //
-// Redesigned per the "Main" canvas (Settings.dc.html): same `GlassPanelPage`
-// shell as the other redesigned pages, warm palette instead of the shared
-// dynamic `Palette`. Functionally unchanged — appearance, permissions,
-// dictation key, and recognition engine, all still wired to the exact same
-// `AppDelegate` state.
+// Tabs, the same as Insights': General (the app, and the permissions it needs), Dictation, Notetaker, and License
+// in an official build. Every setting in a tab shows at once — small section labels over white cards, each row a
+// name, a plain line on what it does, and its control — instead of the old closed accordion tiles, where finding a
+// setting meant guessing which tile to open. A sunset dot marks a tab where something needs you, and the page opens
+// there. Everything is still wired to the exact same `AppDelegate` state.
 //
-// The mockup's own "Software" section shows a version number plus an
-// "Update available" pill — this app has no update-checking mechanism at
-// all (no Sparkle, no appcast, nothing to compare against), so that pill
-// would have to be invented from nothing rather than translated. Only the
-// real, honest half — the actual running version, read from the bundle —
-// is implemented here; the update-check itself is a real feature, not a
-// restyle, and hasn't been asked for.
+// The rows are built from the shared pieces in SettingsComponents.swift, so every tab — including the License tab
+// an official release build adds — is made of the same parts.
 
 struct SettingsPage: View {
     @ObservedObject var app: AppDelegate
@@ -29,18 +26,33 @@ struct SettingsPage: View {
     // page happened to re-render for a different reason.
     @ObservedObject private var notetaker: NotetakerController
     @ObservedObject private var meetingDetector: MeetingDetector
+    // The License tab's two sources — neither publishes through `app`.
+    @ObservedObject private var license = LicenseStore.shared
+    @ObservedObject private var updater = SparkleUpdater.shared
+    /// A build from source: the real License tab on a pretend server, to see and try it (`LicensePreview`).
+    @ObservedObject private var preview = LicensePreview.shared
+    @AppStorage(LicensePreview.defaultsKey) private var showLicensePreview = false
+    /// The last tab you looked at, so Settings reopens where you left it.
+    @AppStorage("settingsTab") private var storedTab = SettingsTab.general.rawValue
+    /// `NotchHUDController.isEnabled`'s switch.
+    @AppStorage("notchHUD") private var notchHUD = true
+    /// Translate into's downloads and what macOS's translator can do.
+    @ObservedObject private var translationModels = TranslationModels.shared
+    /// "NEW" on Translate into until it's first switched on.
+    @AppStorage("translateIntoTried") private var translateIntoTried = false
+    /// The worked example's translation, for the pair and translator it was made with.
+    @State private var translationExample: (key: String, text: String?)?
+    /// Set to have macOS download a language for its translator (it asks first).
+    @State private var appleLanguageDownload: TranslationSession.Configuration?
 
     @State private var supportedLocaleIDs: [String] = []
     @State private var handsFreeAutoStop = Settings.handsFreeAutoStop
     @State private var autoPasteEnabled = Settings.autoPasteEnabled
+    @State private var playSounds = Settings.playSounds
     /// Which `AccentFieldSelect` (by its `id`) has its panel open, if any.
     /// Lifted up to the whole page rather than owned by each dropdown —
     /// see the panel-rendering `.overlayPreferenceValue` below for why.
     @State private var openDropdown: String?
-    /// Which tile (by its `tile(id:...)` index) is expanded — mutually
-    /// exclusive, same mechanism as `HelpPage.openTile`. All closed by
-    /// default, same as Help's own tiles.
-    @State private var openTile: Int?
 
     @State private var notetakerLiveTranscriptEnabled = Settings.notetakerLiveTranscriptEnabled
     @State private var notetakerHideFromScreenCapture = Settings.notetakerHideFromScreenCapture
@@ -65,10 +77,21 @@ struct SettingsPage: View {
             // macOS's native scroller by itself.
             ThinScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    header
-                    tiles.padding(.top, 18)
+                    SettingsPageHeader(subtitle: Self.subtitle)
+                    UnderlineTabBar(tabs: tabs, selected: currentTab, attention: attentionTabs,
+                                    title: \.title, select: { storedTab = $0.rawValue })
+                        .padding(.top, 20)
+                    Group {
+                        switch currentTab {
+                        case .general: generalTab
+                        case .dictation: dictationTab
+                        case .notetaker: notetakerTab
+                        case .license: licenseTab
+                        }
+                    }
+                    .padding(.top, 24)
                 }
-                // Attached to the whole page, not to any individual tile or
+                // Attached to the whole page, not to any individual row or
                 // trigger: an `.overlay` only ever paints above its *own*
                 // host view, and a later sibling declared outside that host
                 // still draws on top of it — which is exactly the bug where
@@ -76,7 +99,7 @@ struct SettingsPage: View {
                 // the still-open Recognition-engine panel behind it.
                 // Anchoring here means the open panel always has every row
                 // on the page as an earlier sibling, so it wins regardless
-                // of which trigger (in whichever tile) opened it.
+                // of which trigger opened it.
                 .overlayPreferenceValue(DropdownAnchorKey.self) { anchors in
                     if let openDropdown, let anchor = anchors[openDropdown] {
                         DropdownPanel(
@@ -91,343 +114,447 @@ struct SettingsPage: View {
             }
         }
         .onAppear(perform: loadLocales)
+        .onAppear(perform: openTabIfAsked)
+        .onChange(of: app.openLicenseTile) { _, _ in openTabIfAsked() }
+        .onChange(of: storedTab) { _, _ in openDropdown = nil }
         .sheet(isPresented: $showingNotetakerHotkeyEditor, onDismiss: {
             notetakerHotkeyKeyCode = Settings.notetakerHotkeyKeyCode
             notetakerHotkeyModifiers = Settings.notetakerHotkeyModifiers
         }) { NotetakerHotkeyEditor() }
     }
 
-    // MARK: Tiles (category-level disclosure, mirrors HelpPage's own)
+    static var subtitle: String {
+        Notetaker.isAvailable
+            ? "How Murmur listens and pastes, how Notetaker records calls, and what Murmur needs from your Mac."
+            : "How Murmur listens and pastes, and what Murmur needs from your Mac."
+    }
 
-    private var tiles: some View {
-        VStack(spacing: 12) {
-            tile(id: 0, icon: .settings, title: "General", summary: "Version \(appVersion)") {
-                softwareSection
-            }
-            tile(
-                id: 1, icon: .mic, title: "Dictation",
-                summary: "Dictation key · Language · Recognition engine"
-            ) {
-                dictationSection
-            }
-            tile(
-                id: 2, icon: .notetaker, title: "Notetaker",
-                summary: "Live transcript · Auto-stop · Shortcut"
-            ) {
-                notetakerSection
-            }
-            tile(
-                id: 3, icon: .lock, title: "Privacy & Permissions",
-                summary: "Microphone · Accessibility · Calendar · Screen Recording"
-            ) {
-                privacyPermissionsSection
-            }
+    // MARK: Tabs
+
+    private var showsLicenseTab: Bool { license.channel == .release || showLicensePreview }
+
+    private var tabs: [SettingsTab] {
+        SettingsTab.allCases.filter {
+            ($0 != .license || showsLicenseTab) && ($0 != .notetaker || Notetaker.isAvailable)
         }
     }
 
-    /// Hand-rolled rather than a `DisclosureGroup`, for the same reason
-    /// `HelpPage.tile` is — the label and body need different horizontal
-    /// padding, and a divider only once expanded, which `DisclosureGroup`'s
-    /// single content/label layout doesn't cleanly support.
-    private func tile<Content: View>(
-        id: Int, icon: MurmurIcon, title: String, summary: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        let isOpen = openTile == id
-        return VStack(spacing: 0) {
-            Button {
-                withAnimation(.murmurEase()) { openTile = isOpen ? nil : id }
-            } label: {
+    private var currentTab: SettingsTab {
+        let stored = SettingsTab(rawValue: storedTab) ?? .general
+        return tabs.contains(stored) ? stored : .general
+    }
+
+    private func select(_ tab: SettingsTab) {
+        withAnimation(.murmurEase()) { storedTab = tab.rawValue }
+    }
+
+    /// Dictation can't work without these two; Calendar and Screen Recording only add to Notetaker.
+    private var dictationPermissionsMissing: Bool { !app.micAuthorized || !app.axTrusted }
+
+    private var licensePaused: Bool {
+        if license.channel == .release {
+            if case .paused = license.panelState() { return true }
+        } else if showLicensePreview {
+            if case .paused = preview.store.panelState(buildReleaseDate: nil) { return true }
+        }
+        return false
+    }
+
+    private var attentionTabs: Set<SettingsTab> {
+        var tabs = Set<SettingsTab>()
+        if dictationPermissionsMissing { tabs.insert(.general) }
+        if licensePaused { tabs.insert(.license) }
+        return tabs
+    }
+
+    /// Opens on the tab that matters: License when the receipt email's activation link asked for it
+    /// (`AppDelegate.openLicenseTile`) or dictation is paused — the error line sends people here, so they land on the
+    /// reason and the way back — else General while dictation is missing a permission, else wherever you left it.
+    private func openTabIfAsked() {
+        if app.openLicenseTile {
+            app.openLicenseTile = false
+            if showsLicenseTab { select(.license) }
+        } else if license.channel == .release, licensePaused {
+            storedTab = SettingsTab.license.rawValue
+        } else if dictationPermissionsMissing {
+            storedTab = SettingsTab.general.rawValue
+        }
+    }
+
+    // MARK: General
+
+    private var generalTab: some View {
+        let isSource = license.channel == .source
+        return VStack(alignment: .leading, spacing: 0) {
+            // A build from source: `app.availableUpdate` is the same published property that drives
+            // `SoftwareUpdateView`'s own sheet, which shows itself the moment `checkForUpdates()` finds a newer
+            // release — so this only reflects that state. An official release build: Sparkle's last answer, and a
+            // newer version the license doesn't include points at the License tab, which offers the renewal.
+            SettingsCard {
+                SoftwareStatusRow(
+                    version: appVersion, isSourceBuild: isSource, status: softwareStatus(isSource: isSource),
+                    install: isSource ? nil : { SparkleUpdater.shared.checkForUpdates() },
+                    showLicense: { select(.license) },
+                    checkNow: { SparkleUpdater.shared.checkForUpdates() },
+                    isLast: false)
+                OpenAtLoginRow(isLast: false)
+                SettingsFieldRow(
+                    label: "Setup",
+                    detail: "Walk through permissions, language, engine and your dictation key again.",
+                    isLast: true
+                ) {
+                    Button("Run setup again") { app.showOnboarding() }
+                        .buttonStyle(WarmGhostButtonStyle())
+                }
+            }
+
+            SettingsSectionLabel(title: "PERMISSIONS", trailing: permissionsSummary)
+                .padding(.top, 24)
+            SettingsCard { permissionRows }
+        }
+    }
+
+    private var permissionsSummary: String {
+        switch (app.micAuthorized, app.axTrusted) {
+        case (true, true): "Dictation has everything it needs"
+        case (false, true): "Microphone needs your OK"
+        case (true, false): "Accessibility needs your OK"
+        case (false, false): "Dictation needs two permissions"
+        }
+    }
+
+    @ViewBuilder private var permissionRows: some View {
+        SettingsFieldRow(label: "Microphone", detail: "Hears your dictation.") {
+            if app.micAuthorized {
+                SettingsStatusLabel(title: "Granted")
+            } else {
+                openSystemSettingsButton(pane: "Privacy_Microphone")
+            }
+        }
+        if app.axTrusted {
+            SettingsFieldRow(label: "Accessibility",
+                             detail: "Lets the dictation key work in every app, and pastes for you.",
+                             isLast: !Notetaker.isAvailable) {
+                SettingsStatusLabel(title: "Granted")
+            }
+        } else {
+            // The fix sits right in the row, and only while it's needed: a grant left over from an older build
+            // looks switched on in System Settings but doesn't count — resetting it makes macOS ask once more, and
+            // the new grant sticks for all future updates.
+            SettingsFieldRow(
+                label: "Accessibility",
+                detail: "Lets the dictation key work in every app, and pastes for you. Relaunch Murmur after "
+                    + "allowing it. Already allowed but still not working? The grant belongs to an older build — "
+                    + "reset it, and macOS asks once more.",
+                isLast: !Notetaker.isAvailable
+            ) {
+                openSystemSettingsButton(pane: "Privacy_Accessibility")
+            } footer: {
                 HStack(spacing: 16) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 15, style: .continuous)
-                            .fill(Palette.sunsetSoft)
-                        MurmurIconView(icon: icon)
-                            .frame(width: 24, height: 24)
-                            .foregroundStyle(Palette.sunsetDeep)
-                    }
-                    .frame(width: 52, height: 52)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(title)
-                            .font(.manrope(17, .bold))
-                            .foregroundStyle(Palette.warmInk)
-                        Text(summary)
-                            .font(.manrope(12))
-                            .foregroundStyle(Palette.warmInkFaint)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                    Spacer(minLength: 8)
-                    MurmurIconView(icon: .caret)
-                        .frame(width: 13, height: 13)
-                        .foregroundStyle(Palette.warmInkFainter)
-                        .rotationEffect(.degrees(isOpen ? 90 : 0))
+                    Button("Relaunch") { app.relaunch() }
+                    Button("Reset grant & relaunch") { app.resetAccessibilityGrant() }
                 }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 20)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if isOpen {
-                VStack(spacing: 0) { content() }
-                    .padding(.horizontal, 20)
-                    .padding(.top, 4)
-                    .padding(.bottom, 4)
-                    .overlay(alignment: .top) {
-                        Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
-                    }
+                .buttonStyle(.plain)
+                .font(.manrope(12, .semibold))
+                .foregroundStyle(Palette.sunsetDeep)
+                .padding(.top, 6)
             }
         }
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Palette.warmRowBorder, lineWidth: 1))
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Settings")
-                .font(.manrope(22, .medium))
-                .tracking(-0.33)
-                .foregroundStyle(Palette.warmInk)
-            Text("Tap a category to open it — appearance, dictation, Notetaker, and privacy.")
-                .font(.manrope(12.5))
-                .foregroundStyle(Palette.warmInkFaint)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// `.field-row` reskinned in warm tokens: a label/detail on the left, a
-    /// control on the right, a hairline below unless it's the section's
-    /// last row. Reused for every row on this page rather than shared —
-    /// same call as every other bespoke warm view this redesign has added.
-    private func fieldRow<Control: View>(
-        label: String, detail: String? = nil, isLast: Bool = false,
-        @ViewBuilder control: () -> Control
-    ) -> some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .center, spacing: 16) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(label)
-                        .font(.manrope(12.5, .semibold))
-                        .foregroundStyle(Palette.warmInk)
-                    if let detail {
-                        Text(detail)
-                            .font(.manrope(11))
-                            .foregroundStyle(Palette.warmInkSoft)
-                            .lineSpacing(3)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                Spacer(minLength: 16)
-                control()
-            }
-            .padding(.vertical, 12)
-            if !isLast {
-                Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
-            }
-        }
-    }
-
-    // MARK: Privacy & Permissions
-
-    private var privacyPermissionsSection: some View {
-        VStack(spacing: 0) {
-            permissionRow(
-                granted: app.micAuthorized,
-                title: "Microphone",
-                detail: "Required to hear your dictation.",
-                pane: "Privacy_Microphone",
-                isLast: false)
-            permissionRow(
-                granted: app.axTrusted,
-                title: "Accessibility",
-                detail: "Required for the global hotkey and pasting. "
-                    + "Relaunch Murmur after granting.",
-                pane: "Privacy_Accessibility",
-                isLast: false)
-            if !app.axTrusted {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Toggle on in System Settings but still red here? The saved grant "
-                         + "belongs to an older build. Click Reset Grant — the app relaunches, "
-                         + "macOS asks once more, and the new grant sticks for all future updates.")
-                        .font(.manrope(11.5))
-                        .foregroundStyle(Palette.warmInkSoft)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 8) {
-                        Button("Reset Grant & Relaunch") { app.resetAccessibilityGrant() }
-                            .buttonStyle(WarmGhostButtonStyle())
-                        Button("Relaunch") { app.relaunch() }
-                            .buttonStyle(WarmGhostButtonStyle())
-                    }
-                }
-                .padding(.top, 10)
-                .padding(.bottom, 12)
-                Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
-            }
-            requestPermissionRow(
-                granted: meetingDetector.calendarAuthorized,
-                title: "Calendar",
-                detail: "Gives Notetaker a meeting's real title and its attendees' names, "
-                    + "instead of \u{201c}Zoom, 2:14 PM.\u{201d}",
-                isLast: false
+        // Calendar and Screen Recording are asked for by Notetaker alone — nothing else in the app uses them,
+        // so a build without Notetaker neither lists nor requests them.
+        if Notetaker.isAvailable {
+            SettingsFieldRow(
+                label: "Calendar",
+                detail: "Optional · Notetaker names a meeting after its calendar event and lists who was there."
             ) {
-                Task { await meetingDetector.requestCalendarAccess() }
+                if meetingDetector.calendarAuthorized {
+                    SettingsStatusLabel(title: "Granted")
+                } else {
+                    Button("Connect") { Task { await meetingDetector.requestCalendarAccess() } }
+                        .buttonStyle(WarmGhostButtonStyle())
+                }
             }
-            requestPermissionRow(
-                granted: notetaker.screenRecordingAuthorized,
-                title: "Screen Recording",
-                detail: "Lets Notetaker hear the other side of a call through the meeting "
-                    + "app's own audio — it never records your screen.",
+            SettingsFieldRow(
+                label: "Screen Recording",
+                detail: "Lets Notetaker hear the other side of a call. It never records your screen.",
                 isLast: true
             ) {
-                notetaker.requestScreenRecordingAccess()
+                if notetaker.screenRecordingAuthorized {
+                    SettingsStatusLabel(title: "Granted")
+                } else {
+                    Button("Allow") { notetaker.requestScreenRecordingAccess() }
+                        .buttonStyle(WarmGhostButtonStyle())
+                }
             }
         }
     }
 
-    private func permissionRow(
-        granted: Bool, title: String, detail: String, pane: String, isLast: Bool
-    ) -> some View {
-        fieldRow(label: title, detail: detail, isLast: isLast) {
-            if granted {
-                HStack(spacing: 6) {
-                    MurmurIconView(icon: .check).frame(width: 13, height: 13)
-                    Text("Granted").font(.manrope(12, .semibold))
-                }
-                .foregroundStyle(Palette.sunsetDeep)
-            } else {
-                Button("Open Settings") {
-                    let url = URL(string:
-                        "x-apple.systempreferences:com.apple.preference.security?\(pane)")!
-                    NSWorkspace.shared.open(url)
-                }
-                .buttonStyle(WarmGhostButtonStyle())
-            }
+    private func openSystemSettingsButton(pane: String) -> some View {
+        Button("Open System Settings") {
+            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)")!
+            NSWorkspace.shared.open(url)
+        }
+        .buttonStyle(WarmGhostButtonStyle())
+    }
+
+    private func softwareStatus(isSource: Bool) -> SoftwareStatusRow.Status {
+        if isSource { return app.availableUpdate == nil ? .upToDate : .updateAvailable }
+        switch updater.lastCheck {
+        case .available: return .updateAvailable
+        case .upToDate: return updater.notIncluded == nil ? .upToDate : .newerNotIncluded
+        case .unknown: return updater.notIncluded == nil ? .unknown : .newerNotIncluded
         }
     }
 
-    /// Same shape as `permissionRow`, but the grant flow is an in-app
-    /// request (`EKEventStore`/`CGRequestScreenCaptureAccess`) rather than
-    /// a System Settings deep link — Calendar and Screen Recording are both
-    /// requested in-app elsewhere already (Notetaker's own page), so this
-    /// reuses that same flow instead of sending the user to System Settings
-    /// for something Murmur can just ask for directly.
-    private func requestPermissionRow(
-        granted: Bool, title: String, detail: String, isLast: Bool, action: @escaping () -> Void
-    ) -> some View {
-        fieldRow(label: title, detail: detail, isLast: isLast) {
-            if granted {
-                HStack(spacing: 6) {
-                    MurmurIconView(icon: .check).frame(width: 13, height: 13)
-                    Text("Granted").font(.manrope(12, .semibold))
-                }
-                .foregroundStyle(Palette.sunsetDeep)
-            } else {
-                Button("Connect", action: action)
-                    .buttonStyle(WarmGhostButtonStyle())
-            }
-        }
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
     }
 
     // MARK: Dictation
 
-    private var dictationSection: some View {
-        VStack(spacing: 0) {
-            fieldRow(label: "Dictation key") {
-                AccentFieldSelect(
-                    id: "hotkey", label: app.hotkey.displayName, openID: $openDropdown)
-            }
-            fieldRow(
-                label: "Hands-free auto-stop",
-                detail: "Double-tap to start, then stop automatically on a real pause "
-                    + "instead of tapping again. Manual stop always still works.",
-                isLast: false
-            ) {
-                WarmToggle(isOn: $handsFreeAutoStop)
-                    .onChange(of: handsFreeAutoStop) { _, newValue in
-                        Settings.handsFreeAutoStop = newValue
+    /// Only a Mac with a notched screen has anything for the notch switch to change.
+    private var hasNotchedScreen: Bool {
+        NSScreen.screens.contains { NotchGeometry.placement(of: $0) != nil }
+    }
+
+    private var dictationTab: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSectionLabel(title: "DICTATING")
+            SettingsCard {
+                SettingsFieldRow(
+                    label: "Dictation key",
+                    detail: "Hold it, speak, release — the text lands at your cursor. Double-tap for hands-free."
+                ) {
+                    AccentFieldSelect(id: "hotkey", label: app.hotkey.displayName, openID: $openDropdown)
+                }
+                SettingsFieldRow(
+                    label: "Stop hands-free when you pause",
+                    detail: "A hands-free dictation ends by itself when you stop talking. Tapping the key still stops it."
+                ) {
+                    WarmToggle(isOn: $handsFreeAutoStop)
+                        .onChange(of: handsFreeAutoStop) { _, newValue in
+                            Settings.handsFreeAutoStop = newValue
+                        }
+                }
+                SettingsFieldRow(
+                    label: "Paste automatically",
+                    detail: "Off leaves each dictation on the clipboard for you to paste. Apps can differ — set "
+                        + "that in App Profiles."
+                ) {
+                    WarmToggle(isOn: $autoPasteEnabled)
+                        .onChange(of: autoPasteEnabled) { _, newValue in
+                            Settings.autoPasteEnabled = newValue
+                        }
+                }
+                if hasNotchedScreen {
+                    SettingsFieldRow(
+                        label: "Show recording in the notch",
+                        detail: "On your MacBook's screen, the recording pill grows out of the notch. Off keeps "
+                            + "it at the bottom of the screen."
+                    ) {
+                        WarmToggle(isOn: $notchHUD)
                     }
+                }
+                SettingsFieldRow(
+                    label: "Play sounds",
+                    detail: "A soft sound when dictation starts and stops, and when something doesn’t work.",
+                    isLast: true
+                ) {
+                    WarmToggle(isOn: $playSounds)
+                        .onChange(of: playSounds) { _, newValue in
+                            Settings.playSounds = newValue
+                        }
+                }
             }
-            fieldRow(
-                label: "Auto-paste",
-                detail: "Paste a finished dictation at your cursor automatically. Off "
-                    + "leaves it on the clipboard to paste yourself — useful for a field "
-                    + "you'd rather review first. Overridable per app in App Profiles.",
-                isLast: false
-            ) {
-                WarmToggle(isOn: $autoPasteEnabled)
-                    .onChange(of: autoPasteEnabled) { _, newValue in
-                        Settings.autoPasteEnabled = newValue
+
+            // The language you speak and the one Murmur pastes, together — see `TranslateInto`.
+            SettingsSectionLabel(title: "LANGUAGE", trailing: "Everything runs on this Mac")
+                .padding(.top, 24)
+            SettingsCard {
+                SettingsFieldRow(
+                    label: "Language",
+                    detail: "The language you speak. Which ones are offered depends on the engine."
+                ) {
+                    AccentFieldSelect(
+                        id: "language",
+                        label: Locale.current.localizedString(forIdentifier: app.localeID) ?? app.localeID,
+                        openID: $openDropdown)
+                }
+                translateRows
+            }
+            .translationTask(appleLanguageDownload) { session in
+                try? await session.prepareTranslation()
+                app.refreshTranslationPair()
+            }
+
+            SettingsSectionLabel(title: "RECOGNITION")
+                .padding(.top, 24)
+            SettingsCard {
+                SettingsFieldRow(label: "Engine", detail: engineDetail, isLast: modelRow == nil) {
+                    AccentFieldSelect(id: "engine", label: engineLabel(app.engine), openID: $openDropdown)
+                }
+                if let modelRow {
+                    SettingsFieldRow(label: "Model", status: modelRow.status, isLast: true) {
+                        AccentFieldSelect(id: modelRow.dropdownID, label: modelRow.label, openID: $openDropdown)
                     }
-            }
-            fieldRow(label: "Language") {
-                AccentFieldSelect(
-                    id: "language",
-                    label: Locale.current.localizedString(forIdentifier: app.localeID) ?? app.localeID,
-                    openID: $openDropdown)
-            }
-            fieldRow(
-                label: "Recognition engine",
-                detail: engineDetail,
-                isLast: app.engine != "whisper" && app.engine != "whispercpp"
-                    && app.engine != "parakeet" && app.engine != "sherpa"
-            ) {
-                AccentFieldSelect(id: "engine", label: engineLabel(app.engine), openID: $openDropdown)
-            }
-            if app.engine == "whisper" {
-                fieldRow(
-                    label: "Whisper model",
-                    detail: whisperModelDetail,
-                    isLast: true
-                ) {
-                    AccentFieldSelect(
-                        id: "whisperModel",
-                        label: WhisperEngine.availableModels.first { $0.id == app.whisperModel }?.label
-                            ?? app.whisperModel,
-                        openID: $openDropdown)
                 }
             }
-            if app.engine == "whispercpp" {
-                fieldRow(
-                    label: "whisper.cpp model",
-                    detail: whisperCppModelDetail,
-                    isLast: true
-                ) {
-                    AccentFieldSelect(
-                        id: "whisperCppModel",
-                        label: WhisperCppEngine.availableModels.first { $0.id == app.whisperCppModel }?.label
-                            ?? app.whisperCppModel,
-                        openID: $openDropdown)
+        }
+    }
+
+    // MARK: Translate into
+
+    /// The language spoken, and the one pasted when it's different.
+    private var translatePair: (from: String, to: String?) {
+        let from = TranslateInto.code(forLocale: app.localeID)
+        return (from, app.translateInto.flatMap { $0 == from ? nil : $0 })
+    }
+
+    @ViewBuilder private var translateRows: some View {
+        let (from, to) = translatePair
+        // No hairline under it: the example belongs to this row; one goes in after the example instead.
+        SettingsFieldRow(label: "Translate into", badge: translateIntoTried ? nil : "NEW", isLast: true) {
+            AccentFieldSelect(id: "translateInto", label: to.map(TranslateInto.name) ?? "Off", openID: $openDropdown)
+        } footer: {
+            translateLine(from: from, to: to)
+        }
+        if let to, TranslateInto.languages.contains(from) {
+            translateExample(from: from, to: to)
+            Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
+            translatorRows(from: from, to: to)
+        }
+    }
+
+    /// "You speak Latvian — Murmur pastes it in English." — what the setting does, with your own languages in it.
+    private func translateLine(from: String, to: String?) -> some View {
+        func strong(_ text: String) -> Text {
+            Text(text).font(.manrope(12, .semibold)).foregroundStyle(Palette.warmInk)
+        }
+        let line: Text
+        if let to, TranslateInto.languages.contains(from) {
+            line = Text("You speak ") + strong(TranslateInto.name(from)) + Text(" — Murmur pastes it in ")
+                + strong(TranslateInto.name(to)) + Text(".")
+        } else if to != nil {
+            line = Text("Translating from \(TranslateInto.name(from)) isn’t offered yet.")
+        } else {
+            line = Text("Speak one language — Murmur pastes it in another.")
+        }
+        return line.font(.manrope(12)).foregroundStyle(Palette.warmInkSoft)
+    }
+
+    /// The worked example, translated by the translator in use — hidden until there is one.
+    @ViewBuilder private func translateExample(from: String, to: String) -> some View {
+        let engine = translationModels.engine(from: from, to: to)
+        let key = "\(from)-\(to)-\(engine?.rawValue ?? "none")"
+        if let engine, let said = TranslateInto.examples[from] {
+            TranslationExample(said: said, pasted: translationExample?.key == key ? translationExample?.text : nil)
+                .padding(.bottom, 16)
+                .task(id: key) {
+                    guard translationExample?.key != key || translationExample?.text == nil else { return }
+                    translationExample = (key, nil)
+                    let outcome = await Translator.shared.translate(said, from: from, to: to, engine: engine)
+                    if case .translated(let text, _) = outcome { translationExample = (key, text) }
+                    else { translationExample = (key, said) }
                 }
-            }
-            if app.engine == "parakeet" {
-                fieldRow(
-                    label: "Parakeet model",
-                    detail: parakeetModelDetail,
-                    isLast: true
-                ) {
-                    AccentFieldSelect(
-                        id: "parakeetModel",
-                        label: ParakeetEngine.availableModels.first { $0.id == app.parakeetModel }?.label
-                            ?? app.parakeetModel,
-                        openID: $openDropdown)
+        }
+    }
+
+    private func gigabytes(_ bytes: Int64, of model: TranslationModel) -> String {
+        String(format: "%.1f of %.1f GB", Double(bytes) / 1e9, Double(model.totalBytes) / 1e9)
+    }
+
+    /// Which translator is in use, and the one download that would make it better — never more than one offer.
+    @ViewBuilder private func translatorRows(from: String, to: String) -> some View {
+        let engine = translationModels.engine(from: from, to: to)
+        let latvian = TranslateInto.involvesLatvian(from, to)
+        // The model that would help most: EuroLLM wherever Latvian is involved, else Gemma 4.
+        let wanted: TranslationModel = latvian ? .euroLLM : .gemma
+        let state = translationModels.state(wanted)
+        switch engine {
+        case .gemma?, .euroLLM?:
+            SettingsFieldRow(label: "Translator", status: .done("\(engine!.displayName) — translating on this Mac"),
+                             isLast: true) { EmptyView() }
+        case .apple?:
+            modelOfferRow(label: "Translator", model: .gemma,
+                          offer: "Using macOS’s translator. Gemma 4 reads more naturally — \(TranslationModel.gemma.sizeLabel).",
+                          meanwhile: "macOS translates until then.")
+        case nil:
+            if !latvian, translationModels.appleNeedsDownload(from: from, to: to), state == .absent {
+                SettingsFieldRow(label: "Translator",
+                                 detail: "macOS needs to download \(TranslateInto.name(from == "en" ? to : from)) first.",
+                                 isLast: true) {
+                    Button("Download") {
+                        if appleLanguageDownload == nil {
+                            appleLanguageDownload = TranslationSession.Configuration(
+                                source: Locale.Language(identifier: from), target: Locale.Language(identifier: to))
+                        } else {
+                            appleLanguageDownload?.invalidate()
+                        }
+                    }
+                    .buttonStyle(WarmGhostButtonStyle())
                 }
+            } else {
+                modelOfferRow(label: "Translator", model: wanted,
+                              offer: latvian
+                                ? "Latvian needs EuroLLM — \(wanted.sizeLabel), stays on this Mac."
+                                : "Translating this needs Gemma 4 — \(wanted.sizeLabel), stays on this Mac.",
+                              meanwhile: "It translates once it’s ready.")
             }
-            if app.engine == "sherpa" {
-                fieldRow(
-                    label: "sherpa-onnx model",
-                    detail: sherpaModelDetail,
-                    isLast: true
-                ) {
-                    AccentFieldSelect(
-                        id: "sherpaModel",
-                        label: SherpaOnnxEngine.availableModels.first { $0.id == app.sherpaModel }?.label
-                            ?? app.sherpaModel,
-                        openID: $openDropdown)
-                }
+        }
+    }
+
+    /// One download on offer: the button, then its progress, then — if it stopped — why, and again.
+    @ViewBuilder private func modelOfferRow(label: String, model: TranslationModel, offer: String,
+                                            meanwhile: String) -> some View {
+        switch translationModels.state(model) {
+        case .downloading(let received):
+            SettingsFieldRow(label: label,
+                             status: .working("Downloading \(model.name) — \(gigabytes(received, of: model)). \(meanwhile)"),
+                             isLast: true) {
+                Button("Cancel") { translationModels.cancel(model) }.buttonStyle(WarmGhostButtonStyle())
             }
+        case .failed(let reason):
+            SettingsFieldRow(label: label, detail: offer, warning: "The download stopped: \(reason)", isLast: true) {
+                Button("Try again") { translationModels.download(model) }.buttonStyle(WarmGhostButtonStyle())
+            }
+        case .ready, .absent:
+            SettingsFieldRow(label: label, detail: offer, isLast: true) {
+                Button("Download \(model.name)") { translationModels.download(model) }.buttonStyle(WarmGhostButtonStyle())
+            }
+        }
+    }
+
+    /// The selected engine's model row — nil for Apple's engine, which has no models to pick.
+    private var modelRow: (dropdownID: String, label: String, status: SettingsRowStatus)? {
+        func status(ready: Bool, downloaded: Bool) -> SettingsRowStatus {
+            if ready { return .done("Loaded — transcribing your dictations") }
+            return .working((downloaded ? "Loading" : "Downloading")
+                            + " — Apple's engine covers your dictations until it's ready")
+        }
+        switch app.engine {
+        case "whisper":
+            return ("whisperModel",
+                    WhisperEngine.availableModels.first { $0.id == app.whisperModel }?.label ?? app.whisperModel,
+                    status(ready: app.whisperReady,
+                           downloaded: app.whisperEngine.isModelDownloaded(app.whisperModel)))
+        case "whispercpp":
+            return ("whisperCppModel",
+                    WhisperCppEngine.availableModels.first { $0.id == app.whisperCppModel }?.label
+                        ?? app.whisperCppModel,
+                    status(ready: app.whisperCppReady,
+                           downloaded: app.whisperCppEngine.isModelDownloaded(app.whisperCppModel)))
+        case "parakeet":
+            return ("parakeetModel",
+                    ParakeetEngine.availableModels.first { $0.id == app.parakeetModel }?.label ?? app.parakeetModel,
+                    status(ready: app.parakeetReady,
+                           downloaded: app.parakeetEngine.isModelDownloaded(app.parakeetModel)))
+        case "sherpa":
+            return ("sherpaModel",
+                    SherpaOnnxEngine.availableModels.first { $0.id == app.sherpaModel }?.label ?? app.sherpaModel,
+                    status(ready: app.sherpaReady,
+                           downloaded: app.sherpaEngine.isModelDownloaded(app.sherpaModel)))
+        default:
+            return nil
         }
     }
 
@@ -446,6 +573,8 @@ struct SettingsPage: View {
         case "parakeetModel": return ParakeetEngine.availableModels.map(\.id)
         case "sherpaModel": return SherpaOnnxEngine.availableModels.map(\.id)
         case "language": return pickerLocaleIDs
+        case "translateInto":
+            return ["off"] + TranslateInto.languages.filter { $0 != TranslateInto.code(forLocale: app.localeID) }
         case "notetakerMaxLength": return ["30", "60", "120", "240", "0"]
         default: return []
         }
@@ -466,6 +595,8 @@ struct SettingsPage: View {
             return { m in SherpaOnnxEngine.availableModels.first { $0.id == m }?.label ?? m }
         case "language":
             return { id in Locale.current.localizedString(forIdentifier: id) ?? id }
+        case "translateInto":
+            return { code in code == "off" ? "Off — paste as I speak" : TranslateInto.name(code) }
         case "notetakerMaxLength":
             return { raw in
                 switch raw {
@@ -493,6 +624,8 @@ struct SettingsPage: View {
         case "parakeetModel": return Binding(get: { app.parakeetModel }, set: { app.setParakeetModel($0) })
         case "sherpaModel": return Binding(get: { app.sherpaModel }, set: { app.setSherpaModel($0) })
         case "language": return Binding(get: { app.localeID }, set: { app.setLocale($0) })
+        case "translateInto":
+            return Binding(get: { app.translateInto ?? "off" }, set: { app.setTranslateInto($0 == "off" ? nil : $0) })
         case "notetakerMaxLength":
             return Binding(
                 get: { String(notetakerMaxRecordingMinutes) },
@@ -523,198 +656,105 @@ struct SettingsPage: View {
 
     private var engineDetail: String {
         switch app.engine {
-        case "whisper":
-            return "Whisper: best accuracy on accents and jargon; your vocabulary is fed "
-                + "to the model. Runs locally."
-        case "whispercpp":
-            return "whisper.cpp: the same Whisper models, run on the GPU via Metal instead "
-                + "of the Neural Engine — faster, at some cost to battery life. Runs locally."
-        case "parakeet":
-            return "Parakeet: NVIDIA's model, run on the Neural Engine — notably fast, "
-                + "strong accuracy. Your dictionary isn't fed to it yet, unlike the "
-                + "Whisper engines above. Runs locally."
-        case "sherpa":
-            return "sherpa-onnx: a newer, CPU-only engine (SenseVoice) — no Neural Engine "
-                + "acceleration, but very fast even so. English only for now, and less "
-                + "tested here than the engines above. Your dictionary isn't fed to it "
-                + "yet either. Runs locally."
-        default:
-            return "Apple: instant, built into macOS. Runs locally."
+        case "whisper": "Whisper on the Neural Engine — the most accurate on accents and jargon."
+        case "whispercpp": "Whisper on the graphics chip — fast and precise, a little harder on the battery."
+        case "parakeet": "NVIDIA's Parakeet on the Neural Engine — very fast, and accurate."
+        case "sherpa": "Experimental, on the processor only — fast, but English only for now."
+        default: "Built into macOS — instant, with nothing to download."
         }
-    }
-
-    private var whisperModelDetail: String {
-        if app.whisperReady {
-            return "Model loaded — Whisper is transcribing your dictations."
-        }
-        if app.whisperEngine.isModelDownloaded(app.whisperModel) {
-            return "Model downloaded — loading. Apple engine covers dictations until it's ready."
-        }
-        return "Downloading in the background. Apple engine covers dictations until it's ready."
-    }
-
-    private var whisperCppModelDetail: String {
-        if app.whisperCppReady {
-            return "Model loaded — whisper.cpp is transcribing your dictations."
-        }
-        if app.whisperCppEngine.isModelDownloaded(app.whisperCppModel) {
-            return "Model downloaded — loading. Apple engine covers dictations until it's ready."
-        }
-        return "Downloading in the background. Apple engine covers dictations until it's ready."
-    }
-
-    private var parakeetModelDetail: String {
-        if app.parakeetReady {
-            return "Model loaded — Parakeet is transcribing your dictations."
-        }
-        if app.parakeetEngine.isModelDownloaded(app.parakeetModel) {
-            return "Model downloaded — loading. Apple engine covers dictations until it's ready."
-        }
-        return "Downloading in the background. Apple engine covers dictations until it's ready."
-    }
-
-    private var sherpaModelDetail: String {
-        if app.sherpaReady {
-            return "Model loaded — sherpa-onnx is transcribing your dictations."
-        }
-        if app.sherpaEngine.isModelDownloaded(app.sherpaModel) {
-            return "Model downloaded — loading. Apple engine covers dictations until it's ready."
-        }
-        return "Downloading in the background. Apple engine covers dictations until it's ready."
     }
 
     // MARK: Notetaker
 
-    private var notetakerSection: some View {
-        VStack(spacing: 0) {
-            fieldRow(
-                label: "Show live transcript",
-                detail: "Rough captions from both sides of the call while it's still running "
-                    + "— the real, diarized transcript is only written once you stop."
-            ) {
-                WarmToggle(isOn: $notetakerLiveTranscriptEnabled)
-                    .onChange(of: notetakerLiveTranscriptEnabled) { _, newValue in
-                        Settings.notetakerLiveTranscriptEnabled = newValue
-                    }
-            }
-            fieldRow(
-                label: "Don't show Notetaker in screen capture",
-                detail: "Keeps Murmur's own window out of anything you screen-record or "
-                    + "share while capturing a meeting."
-            ) {
-                WarmToggle(isOn: $notetakerHideFromScreenCapture)
-                    .onChange(of: notetakerHideFromScreenCapture) { _, newValue in
-                        Settings.notetakerHideFromScreenCapture = newValue
-                    }
-            }
-            fieldRow(
-                label: "Stop automatically when the call ends",
-                detail: "Ends the capture on its own once the meeting app closes."
-            ) {
-                WarmToggle(isOn: $notetakerAutoStopOnCallEnd)
-                    .onChange(of: notetakerAutoStopOnCallEnd) { _, newValue in
-                        Settings.notetakerAutoStopOnCallEnd = newValue
-                    }
-            }
-            fieldRow(
-                label: "Maximum recording length",
-                detail: "Stops automatically at this length."
-            ) {
-                AccentFieldSelect(
-                    id: "notetakerMaxLength",
-                    label: dropdownLabel(for: "notetakerMaxLength")(String(notetakerMaxRecordingMinutes)),
-                    openID: $openDropdown)
-            }
-            fieldRow(
-                label: "Also detect meetings in your browser",
-                detail: "Chrome, Safari, Edge, Arc, Brave. Reads only the active tab's URL "
-                    + "to check for a meeting link — never your browsing history."
-            ) {
-                WarmToggle(isOn: $browserMeetingDetectionEnabled)
-                    .onChange(of: browserMeetingDetectionEnabled) { _, newValue in
-                        Settings.browserMeetingDetectionEnabled = newValue
-                    }
-            }
-            fieldRow(
-                label: "Keyboard shortcut",
-                detail: "Starts or stops capturing the current call, from anywhere.",
-                isLast: true
-            ) {
-                Button { showingNotetakerHotkeyEditor = true } label: {
-                    HStack(spacing: 6) {
-                        ForEach(KeyComboLabel.symbols(for: notetakerHotkeyModifiers), id: \.self) { symbol in
-                            notetakerKeycap(symbol)
+    private var notetakerTab: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSectionLabel(title: "STARTING AND STOPPING")
+            SettingsCard {
+                SettingsFieldRow(label: "Shortcut", detail: "Starts or stops recording the current call, from any app.") {
+                    Button { showingNotetakerHotkeyEditor = true } label: {
+                        HStack(spacing: 3) {
+                            ForEach(KeyComboLabel.symbols(for: notetakerHotkeyModifiers), id: \.self) { symbol in
+                                WarmKeycap(label: symbol)
+                            }
+                            WarmKeycap(label: KeyComboLabel.keyName(for: notetakerHotkeyKeyCode))
+                            MurmurIconView(icon: .edit)
+                                .frame(width: 10, height: 10)
+                                .foregroundStyle(Palette.warmInkFaint)
+                                .padding(.leading, 5)
                         }
-                        notetakerKeycap(KeyComboLabel.keyName(for: notetakerHotkeyKeyCode))
-                        MurmurIconView(icon: .edit)
-                            .frame(width: 10, height: 10)
-                            .foregroundStyle(Palette.warmInkFaint)
-                            .padding(.leading, 2)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .murmurTooltip("Change shortcut")
                 }
-                .buttonStyle(.plain)
+                SettingsFieldRow(
+                    label: "Detect meetings in your browser",
+                    detail: "Chrome, Safari, Edge, Arc and Brave. Reads only the open tab's address, never your history."
+                ) {
+                    WarmToggle(isOn: $browserMeetingDetectionEnabled)
+                        .onChange(of: browserMeetingDetectionEnabled) { _, newValue in
+                            Settings.browserMeetingDetectionEnabled = newValue
+                        }
+                }
+                SettingsFieldRow(label: "Stop when the call ends",
+                                 detail: "Recording ends by itself once the meeting app closes.") {
+                    WarmToggle(isOn: $notetakerAutoStopOnCallEnd)
+                        .onChange(of: notetakerAutoStopOnCallEnd) { _, newValue in
+                            Settings.notetakerAutoStopOnCallEnd = newValue
+                        }
+                }
+                SettingsFieldRow(label: "Longest recording",
+                                 detail: "A forgotten recording stops by itself at this length.",
+                                 isLast: true) {
+                    AccentFieldSelect(
+                        id: "notetakerMaxLength",
+                        label: dropdownLabel(for: "notetakerMaxLength")(String(notetakerMaxRecordingMinutes)),
+                        openID: $openDropdown)
+                }
+            }
+
+            SettingsSectionLabel(title: "WHILE RECORDING")
+                .padding(.top, 24)
+            SettingsCard {
+                SettingsFieldRow(
+                    label: "Show live transcript",
+                    detail: "Rough captions of both sides while the call runs. The full transcript is written when you stop."
+                ) {
+                    WarmToggle(isOn: $notetakerLiveTranscriptEnabled)
+                        .onChange(of: notetakerLiveTranscriptEnabled) { _, newValue in
+                            Settings.notetakerLiveTranscriptEnabled = newValue
+                        }
+                }
+                SettingsFieldRow(
+                    label: "Hide Murmur when you share your screen",
+                    detail: "Keeps Murmur's window out of screen shares and screen recordings while Notetaker records.",
+                    isLast: true
+                ) {
+                    WarmToggle(isOn: $notetakerHideFromScreenCapture)
+                        .onChange(of: notetakerHideFromScreenCapture) { _, newValue in
+                            Settings.notetakerHideFromScreenCapture = newValue
+                        }
+                }
             }
         }
     }
 
-    private func notetakerKeycap(_ label: String) -> some View {
-        Text(label)
-            .font(.manrope(11, .semibold))
-            .foregroundStyle(Palette.warmInk)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(Palette.warmRowBorder, in: RoundedRectangle(cornerRadius: 5))
-    }
+    // MARK: License
 
-    // MARK: Software
-
-    /// Real status, not decoration — `app.availableUpdate` is the same
-    /// published property that drives `SoftwareUpdateView`'s own sheet
-    /// (`AppShellRoot`'s `.sheet(item: $app.availableUpdate)`), which
-    /// already shows itself automatically the moment `checkForUpdates()`
-    /// finds a newer release. By the time anyone is looking at this row,
-    /// that's almost always already resolved one way or the other, so this
-    /// just reflects the same state rather than checking again.
-    private var softwareSection: some View {
-        fieldRow(label: "Murmur", detail: "Version \(appVersion)", isLast: true) {
-            if app.availableUpdate == nil {
-                // Quiet, not a badge — the normal state deserves no more
-                // visual weight than a permission that's already
-                // `Granted` gets (`permissionRow`'s own identical
-                // treatment just below, in the Privacy tile): a check and
-                // some text, no fill. Reserving the filled orange pill for
-                // "Update available" is what actually makes that state
-                // read as worth noticing.
-                HStack(spacing: 6) {
-                    MurmurIconView(icon: .check).frame(width: 13, height: 13)
-                    Text("Up to date").font(.manrope(12, .semibold))
-                }
-                .foregroundStyle(Palette.sunsetDeep)
-            } else {
-                // Same outer-capsule treatment as the Theme picker just
-                // above — a white capsule with a `warmRowBorder` stroke
-                // and 2pt inset around the filled inner pill — so this
-                // reads as belonging to the same control family, not a
-                // one-off badge, precisely because it's the state that
-                // should draw the eye the way a selected theme option does.
-                HStack(spacing: 0) {
-                    Text("Update available")
-                        .font(.manrope(12, .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(Palette.sunset))
-                }
-                .padding(2)
-                .background(Color.white, in: Capsule())
-                .overlay(Capsule().stroke(Palette.warmRowBorder, lineWidth: 1))
-                .fixedSize()
+    /// Only an official release build has a license. A build from source shows the tab only while the preview is
+    /// on (`defaults write local.murmur licensePreview -bool true`) — the very same card a buyer or trial user
+    /// sees, on a pretend server that never touches this build's own dictation. Nothing on it says "preview":
+    /// the developer controls (`LicensePreviewControls`) and the General switch row are not part of the page.
+    @ViewBuilder private var licenseTab: some View {
+        if license.channel == .release {
+            SettingsCard {
+                LicenseSection(store: license, notIncluded: updater.notIncluded)
+            }
+        } else {
+            SettingsCard {
+                LicenseSection(store: preview.store, notIncluded: preview.notIncluded, buildReleaseDate: nil)
             }
         }
-    }
-
-    private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
     }
 
     /// The engine currently selected in Settings determines which
@@ -745,6 +785,45 @@ struct SettingsPage: View {
     }
 }
 
+/// Starts Murmur when you log in (`SMAppService.mainApp`). If macOS wants the OK in System Settings first, the row
+/// says so and opens Login Items instead of showing a switch that looks on but isn't.
+private struct OpenAtLoginRow: View {
+    var isLast: Bool
+    @State private var status = SMAppService.mainApp.status
+    @State private var error: String?
+
+    var body: some View {
+        SettingsFieldRow(
+            label: "Open at login",
+            detail: status == .requiresApproval
+                ? "Waiting for your OK in System Settings → General → Login Items."
+                : "Starts Murmur when you log in, so the dictation key works right away.",
+            warning: error,
+            isLast: isLast
+        ) {
+            if status == .requiresApproval {
+                Button("Open Login Items") { SMAppService.openSystemSettingsLoginItems() }
+                    .buttonStyle(WarmGhostButtonStyle())
+            } else {
+                WarmToggle(isOn: Binding(get: { status == .enabled }, set: setEnabled))
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            status = SMAppService.mainApp.status
+        }
+    }
+
+    private func setEnabled(_ on: Bool) {
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            error = nil
+        } catch {
+            self.error = "Couldn't change that: \(error.localizedDescription)"
+        }
+        status = SMAppService.mainApp.status
+    }
+}
+
 /// `.switch` reskinned in warm tokens — see VoiceProfileView's own
 /// `warmToggle` for the twin of this; kept as a separate local type here
 /// (rather than shared) since `private` there scopes it to that file.
@@ -768,20 +847,6 @@ private struct WarmToggle: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-}
-
-/// `GhostButtonStyle` reskinned in warm tokens — same soft-accent pairing
-/// the mockup itself uses for its "Update available" pill.
-private struct WarmGhostButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.manrope(11.5, .semibold))
-            .foregroundStyle(Palette.sunsetDeep)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 6)
-            .background(Palette.sunsetSoft, in: RoundedRectangle(cornerRadius: Radius.sm))
-            .scaleEffect(configuration.isPressed ? 0.96 : 1)
     }
 }
 
@@ -961,7 +1026,7 @@ private struct AccentFieldSelect: View {
             .foregroundStyle(isOpen ? Palette.sunsetDeep : Palette.warmInk)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: Radius.sm))
+            .background(Palette.panel, in: RoundedRectangle(cornerRadius: Radius.sm))
             .overlay(
                 RoundedRectangle(cornerRadius: Radius.sm)
                     .stroke(isOpen ? Palette.sunset : Palette.warmRowBorder, lineWidth: isOpen ? 1.5 : 1))
@@ -1019,7 +1084,7 @@ private struct AccentFieldSelectList: View {
         // room to expand into and stretched the whole panel across most
         // of the page instead of hugging its content.
         .frame(minWidth: 220, maxWidth: 320)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         // Every other white card on this page (the tiles themselves) gets
         // a border — this floating panel didn't, which was invisible on
         // its own but broke down the moment Settings grew tall enough for
@@ -1034,7 +1099,6 @@ private struct AccentFieldSelectList: View {
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(Palette.warmDivider, lineWidth: 1))
-        .environment(\.colorScheme, .light)
     }
 
     private var searchField: some View {

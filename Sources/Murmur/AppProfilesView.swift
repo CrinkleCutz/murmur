@@ -57,26 +57,24 @@ struct AppProfilesPage: View {
                 VStack(alignment: .leading, spacing: 0) {
                     header
 
-                    tipBanner("Everything without a profile uses your default tone "
-                              + "(\(StyleSettings.defaultStyle.displayName)) and no template. "
-                              + "A profile can set either half, or both.")
-                        .padding(.top, 18)
-
                     if let note = app.rewriteEngine.availabilityNote {
-                        tipBanner(note).padding(.top, 12)
+                        tipBanner(note).padding(.top, 18)
+                    }
+
+                    if addingRule {
+                        addRow.padding(.top, 24)
                     }
 
                     profileList
-                        .padding(.top, 16)
+                        .padding(.top, addingRule ? 12 : 24)
 
-                    if addingRule {
-                        addRow.padding(.top, 10)
-                    } else {
-                        addProfileButton.padding(.top, 10)
+                    if !suggestedApps.isEmpty {
+                        suggestedCard
+                            .padding(.top, 24)
                     }
 
                     relatedLink
-                        .padding(.top, 14)
+                        .padding(.top, 16)
                 }
             }
         }
@@ -84,7 +82,12 @@ struct AppProfilesPage: View {
             templates = NoteTemplateStore.all()
             loadLocales()
         }
-        .sheet(item: $editingProfile) { editing in
+        // A profile added from a suggestion or the add row starts empty and
+        // lives only here until something's set (the store drops empties);
+        // closing its editor untouched just lets it go again.
+        .sheet(item: $editingProfile, onDismiss: {
+            profiles = profiles.filter { !$0.value.isEmpty }
+        }) { editing in
             if let profile = profiles[editing.id] {
                 ProfileEditorSheet(
                     bundleID: editing.id,
@@ -177,17 +180,38 @@ struct AppProfilesPage: View {
         }
     }
 
+    /// Title and subtitle on the left, the two add actions on the right —
+    /// side by side (not overlaid), so a narrow window wraps the subtitle
+    /// instead of running it under the buttons.
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("App Profiles")
-                .font(.manrope(22, .medium))
-                .tracking(-0.33)
-                .foregroundStyle(Palette.warmInk)
-            Text("What Murmur does when you dictate into a particular app — or website.")
-                .font(.manrope(12.5))
-                .foregroundStyle(Palette.warmInkFaint)
+        HStack(alignment: .top, spacing: 16) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("App Profiles")
+                    .font(.manrope(22, .medium))
+                    .tracking(-0.33)
+                    .foregroundStyle(Palette.warmInk)
+                // The old tip card ("Everything without a profile uses your
+                // default tone…") folded into the subtitle.
+                Text("What Murmur does in a particular app or website. Everything else uses your defaults.")
+                    .font(.manrope(12.5))
+                    .foregroundStyle(Palette.warmInkFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 14) {
+                Button { startAdding(.site) } label: {
+                    Text("Add website")
+                        .font(.manrope(13, .medium))
+                        .foregroundStyle(Palette.warmInkSoft)
+                }
+                .buttonStyle(.plain)
+                Button { startAdding(.app) } label: {
+                    PrimaryActionLabel(title: "Add app")
+                }
+                .buttonStyle(PressScaleButtonStyle(scale: 0.97))
+            }
+            .fixedSize()
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func tipBanner(_ text: String) -> some View {
@@ -204,19 +228,19 @@ struct AppProfilesPage: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     @ViewBuilder
     private var profileList: some View {
         if profiles.isEmpty && !addingRule {
-            Text("No profiles yet — every app and site uses your defaults.")
+            Text("No profiles yet — every app and website uses your defaults.")
                 .font(.manrope(12.5))
                 .italic()
                 .foregroundStyle(Palette.warmInkFaint)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 24)
-                .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         } else {
             let sorted = profiles.sorted { $0.value.appName < $1.value.appName }
             VStack(spacing: 0) {
@@ -236,10 +260,10 @@ struct AppProfilesPage: View {
                     }
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
     }
 
@@ -249,7 +273,7 @@ struct AppProfilesPage: View {
         CompactProfileRow(
             bundleID: bundleID,
             profile: profile,
-            summary: summary(for: bundleID, profile: profile),
+            chips: chips(for: bundleID, profile: profile),
             isHovering: hoveredBundleID == bundleID,
             onHoverChange: { inside in
                 hoveredBundleID = inside
@@ -257,31 +281,6 @@ struct AppProfilesPage: View {
                     : (hoveredBundleID == bundleID ? nil : hoveredBundleID)
             },
             onOpen: { editingProfile = EditingProfile(id: bundleID) })
-    }
-
-    private var addProfileButton: some View {
-        Button {
-            draftBundleID = ""
-            draftSitePattern = ""
-            addRuleMode = .app
-            runningApps = RunningApps.list
-            addingRule = true
-        } label: {
-            HStack(spacing: 8) {
-                MurmurIconView(icon: .plus).frame(width: 13, height: 13)
-                Text("Add a profile").font(.manrope(12.5, .semibold))
-            }
-            .foregroundStyle(Palette.warmInkSoft)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Radius.sm)
-                    .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
-                    .foregroundStyle(Palette.warmDivider))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PressScaleButtonStyle(scale: 0.98))
     }
 
     /// A profile normally binds to an app (bundle ID); a site rule instead
@@ -292,77 +291,170 @@ struct AppProfilesPage: View {
     /// `AppProfileStore.siteProfileKey(forURL:)`.
     private enum AddRuleMode { case app, site }
 
-    private var addRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Picker("", selection: $addRuleMode) {
-                Text("App").tag(AddRuleMode.app)
-                Text("Website").tag(AddRuleMode.site)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 160)
-            .labelsHidden()
+    private func startAdding(_ mode: AddRuleMode) {
+        draftBundleID = ""
+        draftSitePattern = ""
+        addRuleMode = mode
+        runningApps = RunningApps.list
+        addingRule = true
+    }
 
-            HStack(spacing: 8) {
-                if addRuleMode == .app {
-                    WarmFieldSelect(
-                        options: [""] + runningApps.map(\.bundleID),
-                        label: { id in
-                            id.isEmpty
-                                ? "Choose a running app…"
-                                : (runningApps.first { $0.bundleID == id }?.name ?? id)
-                        },
-                        selection: $draftBundleID)
-                } else {
-                    TextField("e.g. mail.google.com", text: $draftSitePattern)
-                        .textFieldStyle(.plain)
-                        .font(.manrope(12.5))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .frame(width: 220)
-                        .background(Color.white, in: RoundedRectangle(cornerRadius: Radius.sm))
-                        .overlay(RoundedRectangle(cornerRadius: Radius.sm)
-                            .stroke(Palette.warmRowBorder, lineWidth: 1))
+    /// Creates an empty profile for this app or site and opens its editor
+    /// straight away. Empty on purpose — it used to start with the default
+    /// tone written in "so the new row does something visible", which
+    /// made a profile that changed nothing look as if it did.
+    private func createProfile(key: String, name: String) {
+        if profiles[key] == nil {
+            profiles[key] = AppProfile(appName: name, style: nil, templateID: nil)
+        }
+        addingRule = false
+        draftBundleID = ""
+        draftSitePattern = ""
+        editingProfile = EditingProfile(id: key)
+    }
+
+    /// Inline, above the list. Which kind it adds is decided by the button
+    /// that opened it ("Add app" / "Add website"), so no mode switch. The
+    /// app choices list your most-dictated apps first, then whatever's
+    /// running.
+    private var addRow: some View {
+        HStack(spacing: 10) {
+            if addRuleMode == .app {
+                let suggested = suggestedApps.map { (bundleID: $0.bundleID, name: $0.name) }
+                let running = runningApps.filter { app in
+                    profiles[app.bundleID] == nil && !suggested.contains { $0.bundleID == app.bundleID }
                 }
-                IconButton(icon: .check, help: "Save") {
-                    switch addRuleMode {
-                    case .app:
-                        if let appInfo = runningApps.first(where: { $0.bundleID == draftBundleID }) {
-                            // Starts with the current default tone made
-                            // explicit, so the new row does something
-                            // visible immediately.
-                            profiles[appInfo.bundleID] = AppProfile(
-                                appName: appInfo.name,
-                                style: StyleSettings.defaultStyle,
-                                templateID: nil)
-                            AppProfileStore.profiles = profiles
-                        }
-                    case .site:
-                        let pattern = draftSitePattern.trimmingCharacters(in: .whitespaces)
-                        if !pattern.isEmpty {
-                            profiles[AppProfileStore.siteKey(forPattern: pattern)] = AppProfile(
-                                appName: pattern,
-                                style: StyleSettings.defaultStyle,
-                                templateID: nil)
-                            AppProfileStore.profiles = profiles
-                        }
-                    }
-                    addingRule = false
-                    draftBundleID = ""
-                    draftSitePattern = ""
-                }
+                let choices = suggested + running
+                WarmFieldSelect(
+                    options: [""] + choices.map(\.bundleID),
+                    label: { id in
+                        id.isEmpty ? "Choose an app…" : (choices.first { $0.bundleID == id }?.name ?? id)
+                    },
+                    selection: $draftBundleID)
+            } else {
+                TextField("Website, e.g. mail.google.com", text: $draftSitePattern)
+                    .textFieldStyle(.plain)
+                    .font(.manrope(13))
+                    .foregroundStyle(Palette.warmInk)
+                    .padding(.horizontal, 12)
+                    .frame(width: 260, height: 32)
+                    .background(Palette.panel, in: RoundedRectangle(cornerRadius: Radius.sm))
+                    .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmRowBorder, lineWidth: 1))
+                    .onSubmit(commitAdd)
+            }
+            IconButton(icon: .check, hoverFill: Palette.hoverWash, help: "Add", action: commitAdd)
                 .disabled(addRuleMode == .app
                     ? draftBundleID.isEmpty
                     : draftSitePattern.trimmingCharacters(in: .whitespaces).isEmpty)
-                IconButton(icon: .plus, rotated: true, help: "Cancel") {
-                    addingRule = false
-                    draftBundleID = ""
-                    draftSitePattern = ""
-                }
-                Spacer()
+            IconButton(icon: .plus, rotated: true, hoverFill: Palette.hoverWash, help: "Cancel") {
+                addingRule = false
+                draftBundleID = ""
+                draftSitePattern = ""
             }
+            Spacer()
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 9)
+        .onExitCommand { addingRule = false }
+    }
+
+    private func commitAdd() {
+        switch addRuleMode {
+        case .app:
+            guard !draftBundleID.isEmpty else { return }
+            createProfile(key: draftBundleID, name: Self.resolveApp(bundleID: draftBundleID).name)
+        case .site:
+            let pattern = draftSitePattern.trimmingCharacters(in: .whitespaces)
+            guard !pattern.isEmpty else { return }
+            createProfile(key: AppProfileStore.siteKey(forPattern: pattern), name: pattern)
+        }
+    }
+
+    // MARK: Suggested
+
+    /// The apps you dictated into most over the last 7 days that don't have
+    /// a profile yet and are installed — from `UsageStatsStore`'s per-app
+    /// words, so the page brings you the apps worth setting up instead of
+    /// making you hunt for them. Murmur itself is never suggested.
+    private var suggestedApps: [(bundleID: String, name: String, icon: NSImage?, words: Int)] {
+        let calendar = Calendar.current
+        let start = calendar.date(byAdding: .day, value: -6, to: calendar.startOfDay(for: Date()))!
+        var words: [String: Int] = [:]
+        for day in app.usageStats.days(from: start) {
+            words.merge(day.appWords ?? [:], uniquingKeysWith: +)
+        }
+        return words
+            .filter { profiles[$0.key] == nil && $0.key != Bundle.main.bundleIdentifier }
+            .sorted { $0.value > $1.value }
+            .compactMap { bundleID, count in
+                guard NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil else { return nil }
+                let resolved = Self.resolveApp(bundleID: bundleID)
+                return (bundleID, resolved.name, resolved.icon, count)
+            }
+            .prefix(3)
+            .map { $0 }
+    }
+
+    private var suggestedCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .lastTextBaseline) {
+                Text("Suggested")
+                    .font(.manrope(13, .semibold))
+                    .foregroundStyle(Palette.warmInk)
+                Spacer()
+                Text("apps you dictate into most, without a profile")
+                    .font(.manrope(11.5))
+                    .foregroundStyle(Palette.warmInkFaint)
+            }
+            VStack(spacing: 0) {
+                ForEach(Array(suggestedApps.enumerated()), id: \.element.bundleID) { index, suggestion in
+                    if index > 0 {
+                        Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
+                    }
+                    HStack(spacing: 12) {
+                        AppIconTile(icon: suggestion.icon)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(suggestion.name)
+                                .font(.manrope(13, .semibold))
+                                .foregroundStyle(Palette.warmInk)
+                            Text("\(suggestion.words.formatted()) words this week")
+                                .font(.manrope(12))
+                                .foregroundStyle(Palette.warmInkSoft)
+                        }
+                        Spacer()
+                        Button {
+                            createProfile(key: suggestion.bundleID, name: suggestion.name)
+                        } label: {
+                            HStack(spacing: 6) {
+                                MurmurIconView(icon: .plus).frame(width: 11, height: 11)
+                                Text("Add").font(.manrope(12.5, .semibold))
+                            }
+                            .foregroundStyle(Palette.warmInk)
+                            .padding(.horizontal, 12)
+                            .frame(height: 28)
+                            .background(Palette.panel, in: RoundedRectangle(cornerRadius: Radius.sm))
+                            .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmDivider, lineWidth: 1))
+                        }
+                        .buttonStyle(PressScaleButtonStyle(scale: 0.96))
+                    }
+                    .padding(.vertical, 10)
+                }
+            }
+            .padding(.top, 8)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    /// Resolves via the *installed* app — its current name and icon — not
+    /// the name saved when a profile was created, which can go stale (a
+    /// profile saved as "ChatGPT" was really bound to the Codex app).
+    static func resolveApp(bundleID: String) -> (name: String, icon: NSImage?) {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            return (bundleID, nil)
+        }
+        return (FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: ""),
+                NSWorkspace.shared.icon(forFile: url.path))
     }
 
     private var relatedLink: some View {
@@ -383,28 +475,38 @@ struct AppProfilesPage: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
-    /// A middot-joined list of just this profile's *active* overrides — the
-    /// whole reason the engine override was easy to miss before is that it
-    /// lived behind a chevron with nothing on the always-visible row
-    /// hinting it was even set. Every override that actually does
-    /// something appears here now, not just tone/template.
-    private func summary(for bundleID: String, profile: AppProfile) -> String {
-        var parts: [String] = []
-        if let tone = profile.style?.displayName { parts.append(tone) }
+    /// This profile's active overrides as chips — every one that actually
+    /// does something, including developer vocabulary (which the old
+    /// middot summary never showed). A setting equal to the current default
+    /// says so ("— your default", faint), so a profile that changes nothing
+    /// no longer reads as if it does.
+    private func chips(for bundleID: String, profile: AppProfile) -> [(text: String, isDefault: Bool)] {
+        var chips: [(String, Bool)] = []
+        if let tone = profile.style {
+            chips.append(tone == StyleSettings.defaultStyle
+                         ? ("\(tone.displayName) — your default", true)
+                         : (tone.displayName, false))
+        }
         if let templateID = profile.templateID,
            let name = templates.first(where: { $0.id == templateID })?.name {
-            parts.append(name)
+            chips.append((name, false))
         }
-        if let engine = profile.engine { parts.append(AppProfilesPage.engineDisplayName(engine)) }
+        if let engine = profile.engine { chips.append((AppProfilesPage.engineDisplayName(engine), false)) }
         if let model = profile.model {
-            parts.append(AppProfilesPage.modelDisplayName(model, engine: profile.engine ?? app.engine))
+            chips.append((AppProfilesPage.modelDisplayName(model, engine: profile.engine ?? app.engine), false))
         }
         if let localeID = profile.localeIdentifier {
-            parts.append(Locale.current.localizedString(forIdentifier: localeID) ?? localeID)
+            chips.append((Locale.current.localizedString(forIdentifier: localeID) ?? localeID, false))
         }
-        if profile.autoPaste == false { parts.append("No auto-paste") }
-        if let hotkey = profile.hotkeySlot { parts.append(hotkey.label) }
-        return parts.isEmpty ? "Uses your defaults" : parts.joined(separator: " · ")
+        if let translate = profile.translateInto {
+            chips.append((translate.isEmpty ? "No translation" : "Into \(TranslateInto.name(translate))", false))
+        }
+        if let autoPaste = profile.autoPaste { chips.append((autoPaste ? "Auto-paste" : "No auto-paste", false)) }
+        if let developer = profile.developerVocabulary {
+            chips.append((developer ? "Developer words on" : "Developer words off", false))
+        }
+        if let hotkey = profile.hotkeySlot { chips.append((hotkey.label, false)) }
+        return chips.isEmpty ? [("Uses your defaults", true)] : chips
     }
 
     /// Shared by the row summary above and `ProfileEditorSheet`'s own
@@ -462,25 +564,26 @@ struct AppProfilesPage: View {
 private struct CompactProfileRow: View {
     let bundleID: String
     let profile: AppProfile
-    let summary: String
+    let chips: [(text: String, isDefault: Bool)]
     let isHovering: Bool
     let onHoverChange: (Bool) -> Void
     let onOpen: () -> Void
 
+    private var isSite: Bool { AppProfileStore.isSiteKey(bundleID) }
+
     var body: some View {
+        let resolved = isSite ? (name: profile.appName, icon: nil) : AppProfilesPage.resolveApp(bundleID: bundleID)
+        // A profile whose app isn't installed any more keeps its saved name.
+        let name = !isSite && resolved.icon == nil ? profile.appName : resolved.name
         Button(action: onOpen) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 12) {
+                AppIconTile(icon: resolved.icon, symbol: isSite ? .search : .apps)
+                VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 6) {
-                        Text(profile.appName)
+                        Text(name)
                             .font(.manrope(13, .semibold))
                             .foregroundStyle(Palette.warmInk)
-                        // No dedicated "site" icon exists in `MurmurIcon`
-                        // — a plain text badge distinguishes a website
-                        // rule from an app one without needing a new
-                        // glyph, same weight as the "Recommended"-style
-                        // pills used elsewhere.
-                        if AppProfileStore.isSiteKey(bundleID) {
+                        if isSite {
                             Text("Website")
                                 .font(.manrope(9.5, .semibold))
                                 .foregroundStyle(Palette.warmInkFaint)
@@ -489,10 +592,17 @@ private struct CompactProfileRow: View {
                                 .background(Palette.warmRowBorder, in: Capsule())
                         }
                     }
-                    Text(summary)
-                        .font(.manrope(11))
-                        .foregroundStyle(Palette.warmInkSoft)
-                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        ForEach(Array(chips.enumerated()), id: \.offset) { _, chip in
+                            Text(chip.text)
+                                .font(.manrope(11.5, .medium))
+                                .foregroundStyle(chip.isDefault ? Palette.warmInkFaint : Palette.warmInkSoft)
+                                .padding(.horizontal, 8)
+                                .frame(height: 22)
+                                .background(Palette.warmRowBorder, in: Capsule())
+                                .fixedSize()
+                        }
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -501,20 +611,45 @@ private struct CompactProfileRow: View {
                     .foregroundStyle(Palette.warmInkFainter)
                     .opacity(isHovering ? 1 : 0.5)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 13)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 12)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(
             RoundedRectangle(cornerRadius: Radius.sm)
-                .fill(isHovering ? Palette.warmRowBorder.opacity(0.55) : Color.clear))
+                .fill(isHovering ? Palette.hoverWash : Color.clear))
         // See HomeView.swift's historyRow for why this is needed: a .clear
         // background makes SwiftUI treat the row's empty space as outside
         // the hoverable region until this forces the whole padded frame to
         // count, regardless of what's actually drawn there.
         .contentShape(Rectangle())
         .onHover(perform: onHoverChange)
+        .animation(.easeOut(duration: 0.1), value: isHovering)
+    }
+}
+
+/// An app's real icon at 28pt, or — for a website, or an app that's no
+/// longer installed — a warm tile with a glyph, the same tile Insights'
+/// category rows use.
+private struct AppIconTile: View {
+    let icon: NSImage?
+    var symbol: MurmurIcon = .apps
+
+    var body: some View {
+        Group {
+            if let icon {
+                Image(nsImage: icon).resizable()
+            } else {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 7).fill(Palette.warmRowBorder)
+                    MurmurIconView(icon: symbol)
+                        .frame(width: 13, height: 13)
+                        .foregroundStyle(Palette.sunsetDeep)
+                }
+            }
+        }
+        .frame(width: 28, height: 28)
     }
 }
 
@@ -601,6 +736,17 @@ private struct ProfileEditorSheet: View {
             return "Default (\(Locale.current.localizedString(forIdentifier: globalLocaleID) ?? globalLocaleID))"
         }
         return Locale.current.localizedString(forIdentifier: id) ?? id
+    }
+
+    /// nil follows Settings, "" is off in this app, else the language — see `TranslateInto`.
+    private var translateOptions: [String?] { [nil, ""] + TranslateInto.languages.map { Optional($0) } }
+
+    private func translateLabel(_ value: String?) -> String {
+        switch value {
+        case nil: return "Default (\(TranslateInto.target.map(TranslateInto.name) ?? "Off"))"
+        case ""?: return "Off"
+        case let code?: return TranslateInto.name(code)
+        }
     }
 
     private var autoPasteOptions: [Bool?] { [nil, true, false] }
@@ -707,10 +853,15 @@ private struct ProfileEditorSheet: View {
                         selection: Binding(get: { profile.model }, set: { set(\.model, $0) }))
                 }
             }
-            sheetRow(label: "Language", isLast: true) {
+            sheetRow(label: "Language") {
                 WarmFieldSelect(
                     options: localeSelectOptions, label: localeLabel,
                     selection: Binding(get: { profile.localeIdentifier }, set: { set(\.localeIdentifier, $0) }))
+            }
+            sheetRow(label: "Translate into", isLast: true) {
+                WarmFieldSelect(
+                    options: translateOptions, label: translateLabel,
+                    selection: Binding(get: { profile.translateInto }, set: { set(\.translateInto, $0) }))
             }
 
             sectionHeader("Behavior").padding(.top, 20)
@@ -742,7 +893,6 @@ private struct ProfileEditorSheet: View {
         }
         .padding(22)
         .frame(width: 420)
-        .environment(\.colorScheme, .light)
         .confirmationDialog(
             "Delete this profile?", isPresented: $showingDeleteConfirm, titleVisibility: .visible
         ) {
@@ -819,7 +969,7 @@ private struct WarmFieldSelect<T: Hashable>: View {
             .foregroundStyle(Palette.warmInkSoft)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: Radius.sm))
+            .background(Palette.panel, in: RoundedRectangle(cornerRadius: Radius.sm))
             .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmRowBorder, lineWidth: 1))
         }
         .buttonStyle(.plain)
@@ -858,7 +1008,6 @@ private struct WarmFieldSelectList<T: Hashable>: View {
         }
         .padding(.vertical, 4)
         .frame(minWidth: 160)
-        .environment(\.colorScheme, .light)
     }
 }
 

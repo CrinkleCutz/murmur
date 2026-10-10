@@ -6,11 +6,20 @@ cd "$(dirname "$0")/.."
 
 swift build -c release
 
-APP="build/Murmur.app"
+# MURMUR_APP_PATH lets make_release.sh assemble into dist/ without touching the build this Mac is running.
+APP="${MURMUR_APP_PATH:-build/Murmur.app}"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp .build/release/Murmur "$APP/Contents/MacOS/Murmur"
+
+# MLX's GPU kernels for "Translate into" (Gemma 4 / EuroLLM): `swift build` can't compile Metal shaders, so
+# build_mlx_metallib.sh makes them once per mlx-swift version. In the app they go in Contents/Resources (codesign
+# rejects a plain file in Contents/MacOS) and `Translator` points MLX at them; the plain build finds its copy next to
+# the binary.
+scripts/build_mlx_metallib.sh
+cp Vendor/mlx.metallib "$APP/Contents/Resources/mlx.metallib"
+cp Vendor/mlx.metallib .build/release/mlx.metallib
 
 # sherpa-onnx is the one vendored engine that's a real dynamic framework
 # (whisper.xcframework/harper.xcframework are static, fully linked into the
@@ -21,6 +30,14 @@ cp .build/release/Murmur "$APP/Contents/MacOS/Murmur"
 # binary here too, in Contents/MacOS/, not just get left behind in .build/.
 if [ -d ".build/release/sherpa_onnx.framework" ]; then
     cp -R ".build/release/sherpa_onnx.framework" "$APP/Contents/MacOS/sherpa_onnx.framework"
+fi
+
+# Sparkle (official release builds update through it — see SparkleUpdater.swift) links the same way as sherpa-onnx:
+# the binary finds it through its @loader_path rpath, so it goes next to the binary. Its XPC services only exist for
+# sandboxed apps, and Murmur isn't one, so they're left out rather than shipped as unused signed code.
+if [ -d ".build/release/Sparkle.framework" ]; then
+    ditto ".build/release/Sparkle.framework" "$APP/Contents/MacOS/Sparkle.framework"
+    rm -rf "$APP/Contents/MacOS/Sparkle.framework/Versions/B/XPCServices"
 fi
 
 # Bundled fonts: copied straight into Contents/Resources rather than
@@ -68,6 +85,17 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <string>Notetaker checks for an in-progress calendar event only to give a captured meeting note a real title — it never reads or changes your calendar otherwise.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>If you turn on browser meeting detection, Notetaker reads your active browser tab's URL only to check whether it looks like a meeting link — never your browsing history, and never sent anywhere.</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>local.murmur.activate</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>murmurmac</string>
+            </array>
+        </dict>
+    </array>
     <key>NSHumanReadableCopyright</key>
     <string>Local build — no data leaves this Mac.</string>
 </dict>
@@ -100,6 +128,12 @@ if security find-identity -v -p codesigning 2>/dev/null | grep -q "WhisperFlow D
             "$APP/Contents/MacOS/sherpa_onnx.framework/Versions/A/libonnxruntime.dylib"
         codesign --force --sign "WhisperFlow Dev" \
             "$APP/Contents/MacOS/sherpa_onnx.framework"
+    fi
+    # Sparkle inside-out: its installer helper and updater app first, then the framework that seals them.
+    if [ -d "$APP/Contents/MacOS/Sparkle.framework" ]; then
+        codesign --force --sign "WhisperFlow Dev" "$APP/Contents/MacOS/Sparkle.framework/Versions/B/Autoupdate"
+        codesign --force --sign "WhisperFlow Dev" "$APP/Contents/MacOS/Sparkle.framework/Versions/B/Updater.app"
+        codesign --force --sign "WhisperFlow Dev" "$APP/Contents/MacOS/Sparkle.framework"
     fi
     codesign --force --sign "WhisperFlow Dev" "$APP"
     echo "Signed with 'WhisperFlow Dev'."

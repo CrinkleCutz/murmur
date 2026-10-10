@@ -323,6 +323,20 @@ enum DeveloperVocabulary {
             windowSearch: for windowSize in 1...2 {
                 guard index + windowSize <= tokens.count else { continue }
                 let window = tokens[index..<(index + windowSize)]
+                // A two-word window that already contains an exact target
+                // is not a mis-hearing: the term is right and the other
+                // word is just its neighbour. Without this, any word of
+                // three letters or fewer *before* a correct "Supabase"
+                // ("the", "use", "for", "on", "a", "via", …) measured
+                // 0.73 as a two-word span (compact form: only the short
+                // word differs) — above the 0.68 floor — and got swallowed
+                // into the replacement: "We use Supabase for auth." became
+                // "We Supabase for auth.". The `alreadyCorrect` check below
+                // only protects a window that *starts* on the term, i.e.
+                // the word after it; this covers the word before.
+                if windowSize > 1, window.contains(where: { token in
+                    targets.keys.contains { token.word.caseInsensitiveCompare($0) == .orderedSame }
+                }) { continue }
                 let candidate = window.map(\.word).joined(separator: " ")
                 for (term, threshold) in targets {
                     guard candidate.caseInsensitiveCompare(term) != .orderedSame else {
@@ -528,6 +542,29 @@ enum DeveloperVocabulary {
         check(fuzzyCorrect(in: "Supabase was the right call", against: fuzzyCorrectionTargets)
               == "Supabase was the right call",
               "an already-correct \"Supabase\" doesn't consume \"was\" either")
+
+        // The mirror image of the two cases above, found in a full-pipeline
+        // audit: a correct "Supabase" preceded by a short word used to
+        // swallow that word ("We use Supabase for auth." → "We Supabase
+        // for auth.") — any word of ≤3 letters scores ≥0.68 as a two-word
+        // span. Every one of these must come back byte-identical.
+        for sentence in [
+            "We use Supabase for auth.", "Open the Supabase dashboard.",
+            "Set up a Supabase project.", "It runs on Supabase now.",
+            "Log in via Supabase today.", "Check our Supabase logs.",
+            "Pay for Supabase monthly.", "Is it the Supabase database?",
+        ] {
+            check(fuzzyCorrect(in: sentence, against: fuzzyCorrectionTargets) == sentence,
+                  "an already-correct \"Supabase\" doesn't consume the word before it: \(sentence.debugDescription)")
+        }
+        // …while a genuine mis-hearing right after a short word is still
+        // caught, and the short word survives.
+        check(fuzzyCorrect(in: "we use super base for auth", against: fuzzyCorrectionTargets)
+              == "we use Supabase for auth",
+              "still fixes a mis-heard \"super base\" after a short word, keeping that word")
+        check(fuzzyCorrect(in: "open the Soupabase dashboard", against: fuzzyCorrectionTargets)
+              == "open the Supabase dashboard",
+              "still fixes a mis-heard single-word variant after a short word, keeping that word")
 
         // "super bass" sits below the fuzzy floor by design (0.60,
         // *below* database's own 0.63) — it must stay unmatched here, or

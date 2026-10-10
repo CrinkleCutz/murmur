@@ -136,8 +136,7 @@ struct SoftwareUpdateSheet: View {
         }
         .padding(32)
         .frame(width: 520)
-        .background(Color.white)
-        .environment(\.colorScheme, .light)
+        .background(Palette.panel)
     }
 
     private var subtitle: String? {

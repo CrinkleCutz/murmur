@@ -1,6 +1,7 @@
 import AVFAudio
 import CMurmurSherpa
 import Foundation
+import FluidAudio
 
 /// A fifth recognition engine, alongside `WhisperEngine`, `WhisperCppEngine`,
 /// and `ParakeetEngine`: currently four selectable models, all run via
@@ -327,7 +328,7 @@ final class SherpaOnnxEngine {
 
     func transcribe(
         fileAt url: URL, model: String, localeID: String,
-        biasTerms: [String]) async throws -> String {
+        biasTerms: [String], vadManager: VadManager? = nil) async throws -> String {
         let handle = try await pipeline(model: model)
         let (samples, sampleRate) = try Self.pcmMono(from: url)
 
@@ -339,21 +340,107 @@ final class SherpaOnnxEngine {
         onStatus?("Transcribing (sherpa-onnx)")
         defer { onStatus?(nil) }
 
-        return try await Task.detached(priority: .userInitiated) {
+        // FunASR Nano's own documentation (its VAD-integration guide's
+        // `max_single_segment_time: 30000`) says long audio needs
+        // segmenting *before* decoding — this model was never meant to
+        // take a whole recording in one call. sherpa-onnx's ONNX export
+        // bakes that same ~20-30s ceiling in as a fixed 512-token
+        // prompt+audio budget (see shim.c) with no runtime override,
+        // unlike Qwen3-ASR's own fix just below in that file. Splitting on
+        // real speech/silence boundaries first — using the model the way
+        // its own creators built it to be used — turns "silently empty
+        // past ~20s" into "correct at any length," rather than chasing a
+        // ceiling that was never actually configurable. `vadManager` is
+        // optional and this only ever narrows to the one family that
+        // needs it — every other model here decodes exactly as before.
+        if Self.family(for: model) == .funasrNano, let vadManager,
+           let chunked = try? await Self.transcribeInSpeechChunks(
+            handle: handle, samples: samples, sampleRate: sampleRate, vadManager: vadManager),
+           !chunked.isEmpty {
+            return chunked
+        }
+
+        let result = try await Task.detached(priority: .userInitiated) {
             try Self.runTranscribe(handle: handle, samples: samples, sampleRate: sampleRate)
         }.value
+        // A name the model was unsure of, checked against the user's names — only for the models that report each
+        // token's probability (see `runTranscribe`).
+        let isEnglish = String(localeID.prefix(while: { $0 != "-" })).lowercased() == "en"
+        if UnsureWordFix.isEnabled, isEnglish, let words = result.words,
+           let fixed = UnsureWordFix.fix(result.text, words: words, terms: biasTerms) {
+            dictationLog.info("sherpa-onnx: fixed \(fixed.changes.count) unsure name(s)")
+            NameFixLog.record(fixed.changes, engine: "sherpa-onnx")
+            return fixed.text
+        }
+        return result.text
     }
 
+    /// Splits `samples` at real speech/silence boundaries (FluidAudio's
+    /// Silero VAD — the same model already used for Murmur's pre-
+    /// recognition silence gate, see `VadEngine`) and decodes each segment
+    /// independently, joining the results with a space. `VadSegmentation
+    /// Config.default`'s 14s max-segment length already sits with real
+    /// margin under FunASR Nano's observed ~20-30s failure point — no
+    /// custom tuning needed. Returns `""` (never throws past this point)
+    /// if VAD found no speech at all, so the caller's own `!chunked
+    /// .isEmpty` check falls back to the plain single-shot decode instead
+    /// of returning nothing.
+    nonisolated private static func transcribeInSpeechChunks(
+        handle: MurmurSherpaRecognizer, samples: [Float], sampleRate: Int32,
+        vadManager: VadManager
+    ) async throws -> String {
+        // VAD needs 16kHz mono input; this resampled copy exists only for
+        // *detecting* segment boundaries. What actually gets decoded below
+        // is sliced straight from the original native-rate `samples` —
+        // never this copy — so sherpa-onnx still only resamples once,
+        // internally, exactly as `pcmMono`'s own doc comment requires to
+        // avoid the duplicated-syllable bug found earlier.
+        let vadSamples = try resample16kForVAD(samples, from: sampleRate)
+        let segments = try await vadManager.segmentSpeech(vadSamples)
+        guard !segments.isEmpty else { return "" }
+
+        var pieces: [String] = []
+        for segment in segments {
+            let start = max(0, min(segment.startSample(sampleRate: Int(sampleRate)), samples.count))
+            let end = max(start, min(segment.endSample(sampleRate: Int(sampleRate)), samples.count))
+            guard end > start else { continue }
+            let clip = Array(samples[start..<end])
+            if let text = try? runTranscribe(handle: handle, samples: clip, sampleRate: sampleRate).text,
+               !text.isEmpty {
+                pieces.append(text)
+            }
+        }
+        return pieces.joined(separator: " ")
+    }
+
+    /// The text, and each word's certainty when the model reports its tokens' log probabilities ("ys_log_probs" in
+    /// sherpa-onnx's result; nil for models that don't).
     nonisolated private static func runTranscribe(
         handle: MurmurSherpaRecognizer, samples: [Float], sampleRate: Int32
-    ) throws -> String {
+    ) throws -> (text: String, words: [UnsureWordFix.Word]?) {
         guard let cString = samples.withUnsafeBufferPointer({ buffer in
-            MurmurSherpaTranscribe(handle, buffer.baseAddress, Int32(buffer.count), sampleRate)
+            MurmurSherpaTranscribeJSON(handle, buffer.baseAddress, Int32(buffer.count), sampleRate)
         }) else {
             throw SherpaOnnxError.transcribeFailed
         }
         defer { free(cString) }
-        return String(cString: cString).trimmingCharacters(in: .whitespacesAndNewlines)
+        let json = String(cString: cString)
+        guard let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],
+              let text = object["text"] as? String else { throw SherpaOnnxError.transcribeFailed }
+        if ProcessInfo.processInfo.environment["MURMUR_SHERPA_JSON"] != nil {
+            let tokenCount = (object["tokens"] as? [Any])?.count ?? -1
+            let probCount = (object["ys_log_probs"] as? [Any])?.count ?? -1
+            FileHandle.standardError.write(Data("SHERPA_JSON tokens=\(tokenCount) log_probs=\(probCount)\n".utf8))
+        }
+        var words: [UnsureWordFix.Word]?
+        if let tokens = object["tokens"] as? [String], let logProbs = object["ys_log_probs"] as? [Double],
+           tokens.count == logProbs.count, !tokens.isEmpty {
+            words = UnsureWordFix.words(fromTokens: zip(tokens, logProbs).map {
+                (text: $0.0.replacingOccurrences(of: "▁", with: " ").replacingOccurrences(of: "Ġ", with: " "),
+                 p: Float(exp($0.1)))
+            })
+        }
+        return (text.trimmingCharacters(in: .whitespacesAndNewlines), words)
     }
 
     // MARK: - Audio
@@ -413,6 +500,57 @@ final class SherpaOnnxEngine {
         let samples = Array(UnsafeBufferPointer(
             start: channelData[0], count: Int(outputBuffer.frameLength)))
         return (samples, Int32(targetFormat.sampleRate))
+    }
+
+    /// A throwaway 16kHz copy of already-loaded native-rate samples, purely
+    /// for `VadManager.segmentSpeech`'s own input requirement — never what
+    /// actually gets decoded (see `transcribeInSpeechChunks`). Same
+    /// `AVAudioConverter` mechanics as `pcmMono` above, just starting from
+    /// an in-memory buffer instead of reading the file a second time.
+    nonisolated private static func resample16kForVAD(
+        _ samples: [Float], from sampleRate: Int32
+    ) throws -> [Float] {
+        guard let sourceFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: Double(sampleRate),
+            channels: 1, interleaved: false),
+            let targetFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32, sampleRate: 16000,
+                channels: 1, interleaved: false),
+            let converter = AVAudioConverter(from: sourceFormat, to: targetFormat)
+        else { throw SherpaOnnxError.audioConversionFailed }
+
+        guard let inputBuffer = AVAudioPCMBuffer(
+            pcmFormat: sourceFormat, frameCapacity: AVAudioFrameCount(samples.count))
+        else { throw SherpaOnnxError.audioConversionFailed }
+        inputBuffer.frameLength = inputBuffer.frameCapacity
+        samples.withUnsafeBufferPointer { buffer in
+            inputBuffer.floatChannelData![0].update(from: buffer.baseAddress!, count: samples.count)
+        }
+
+        let ratio = targetFormat.sampleRate / sourceFormat.sampleRate
+        let outputCapacity = AVAudioFrameCount(Double(samples.count) * ratio) + 1024
+        guard let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: targetFormat, frameCapacity: outputCapacity)
+        else { throw SherpaOnnxError.audioConversionFailed }
+
+        var suppliedInput = false
+        var conversionError: NSError?
+        let status = converter.convert(to: outputBuffer, error: &conversionError) { _, outStatus in
+            guard !suppliedInput else {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            suppliedInput = true
+            outStatus.pointee = .haveData
+            return inputBuffer
+        }
+        guard status != .error else {
+            throw conversionError ?? SherpaOnnxError.audioConversionFailed
+        }
+        guard let channelData = outputBuffer.floatChannelData else {
+            throw SherpaOnnxError.audioConversionFailed
+        }
+        return Array(UnsafeBufferPointer(start: channelData[0], count: Int(outputBuffer.frameLength)))
     }
 
     // MARK: - Model download

@@ -475,10 +475,16 @@ final class ParakeetEngine {
     /// comparing variants without writing to the same `UserDefaults` the
     /// real app reads, the way `--engine`/`--bundle-id` already work as
     /// plain call parameters rather than Settings mutations.
+    /// `confidence` is `nil` whenever the underlying path doesn't expose
+    /// one — Flash and Nemotron's streaming managers have no equivalent to
+    /// `ASRResult.confidence`/`TokenTiming.confidence` today — never a
+    /// signal to treat as "known to be low." Callers already handle `nil`
+    /// as "no opinion" (see `TranscriptionPlausibility.isPlausible`).
     func transcribe(
         fileAt url: URL, model: String, localeID: String,
         biasTerms: [String], boostVocabulary: Bool,
-        ctcVariant: String = Settings.parakeetCtcVariant) async throws -> String {
+        ctcVariant: String = Settings.parakeetCtcVariant
+    ) async throws -> (text: String, confidence: Float?) {
         // A different model family entirely — see `eouAsrManager()`'s doc
         // comment. No TDT model, no CTC boosting; `biasTerms`/
         // `boostVocabulary` are accepted for call-site uniformity with the
@@ -487,12 +493,20 @@ final class ParakeetEngine {
         if model == "flash" {
             onStatus?("Transcribing (Parakeet Flash)")
             defer { onStatus?(nil) }
-            return try await transcribeWithEou(fileAt: url)
+            return (try await transcribeWithEou(fileAt: url), nil)
         }
         if model == "nemotron" {
             onStatus?("Transcribing (Nemotron)")
             defer { onStatus?(nil) }
-            return try await transcribeWithNemotron(fileAt: url)
+            let nemotron = try await transcribeWithNemotron(fileAt: url)
+            // A name the model was unsure of, checked against the user's names — see `UnsureWordFix`.
+            if UnsureWordFix.isEnabled, localeID.lowercased().hasPrefix("en"),
+               let fixed = UnsureWordFix.fix(nemotron.text, words: nemotron.words, terms: biasTerms) {
+                dictationLog.info("Nemotron: fixed \(fixed.changes.count) unsure name(s)")
+                NameFixLog.record(fixed.changes, engine: "Nemotron")
+                return (fixed.text, nil)
+            }
+            return (nemotron.text, nil)
         }
 
         let models = try await asrModels(for: model)
@@ -528,7 +542,17 @@ final class ParakeetEngine {
         // unlike `WhisperCppEngine`.
         let result = try await manager.transcribe(
             url, decoderState: &decoderState, language: language)
-        return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A name the model was unsure of, checked against the user's names — see `UnsureWordFix`.
+        if UnsureWordFix.isEnabled, isEnglishDictation, let timings = result.tokenTimings,
+           let fixed = UnsureWordFix.fix(
+            text, words: UnsureWordFix.words(fromPieces: timings.map { (text: $0.token, p: $0.confidence) }),
+            terms: biasTerms) {
+            dictationLog.info("Parakeet: fixed \(fixed.changes.count) unsure name(s)")
+            NameFixLog.record(fixed.changes, engine: "Parakeet")
+            text = fixed.text
+        }
+        return (text, result.confidence)
     }
 
     /// Runs `UnifiedAsrManager`'s offline batch decode with CTC-based
@@ -577,7 +601,7 @@ final class ParakeetEngine {
     private func transcribeWithUnifiedVocabularyBoosting(
         fileAt url: URL, biasTerms: [String],
         ctc: (models: CtcModels, tokenizer: CtcTokenizer)
-    ) async throws -> String {
+    ) async throws -> (text: String, confidence: Float?) {
         let terms = biasTerms.compactMap { term -> CustomVocabularyTerm? in
             let ctcTokenIds = ctc.tokenizer.encode(term)
             guard !ctcTokenIds.isEmpty else { return nil }
@@ -589,7 +613,15 @@ final class ParakeetEngine {
         guard !terms.isEmpty else {
             throw ASRError.processingFailed("No bias terms survived CTC tokenization")
         }
-        let vocabulary = CustomVocabularyContext(terms: terms, minSimilarity: 0.85)
+        var vocabulary = CustomVocabularyContext(terms: terms, minSimilarity: 0.85)
+        // Debug only, for comparing boosting settings on the same audio from the command line:
+        // "alpha,minCtcScore,minSimilarity,minCombinedConfidence" (FluidVoice ships 2.8,-2.2,0.72,0.64).
+        if let values = ProcessInfo.processInfo.environment["MURMUR_PARAKEET_VOCAB"]?
+            .split(separator: ",").compactMap({ Float($0) }), values.count == 4 {
+            vocabulary = CustomVocabularyContext(
+                terms: terms, alpha: values[0], minCtcScore: values[1],
+                minSimilarity: values[2], minCombinedConfidence: values[3])
+        }
 
         let unified = try await unifiedManager()
         try await unified.configureVocabularyBoosting(
@@ -605,8 +637,33 @@ final class ParakeetEngine {
         }
         try audioFile.read(into: buffer)
 
-        let text = try await unified.transcribe(buffer)
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // `transcribeWithTimings` (samples, not a buffer — no such overload
+        // exists on `UnifiedAsrManager`) instead of the plain-`String`
+        // `transcribe(_ buffer:)` above's underlying call, so this path
+        // gets the same per-token confidence the plain decode gets from
+        // `ASRResult` — the exact same public `AudioConverter` the
+        // library's own `transcribe(_ buffer:)` uses internally, so the
+        // resampling is identical either way.
+        let samples = try AudioConverter().resampleBuffer(buffer)
+        let result = try await unified.transcribeWithTimings(samples)
+        // Mean of per-token confidences — the same "average of token-level
+        // softmax probabilities" `ASRResult.confidence` itself is, so this
+        // stays on a comparable scale to the plain decode's confidence
+        // rather than needing its own separate threshold.
+        let confidence: Float? = result.tokenTimings.isEmpty ? nil :
+            result.tokenTimings.map(\.confidence).reduce(0, +) / Float(result.tokenTimings.count)
+        let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A name the model was unsure of, checked against the user's names — see `UnsureWordFix`. The confidences are
+        // the decoder's, from before vocabulary boosting; a word the boosting already changed isn't in the text any
+        // more, so it can't be matched and is left alone.
+        if UnsureWordFix.isEnabled, let fixed = UnsureWordFix.fix(
+            text, words: UnsureWordFix.words(fromPieces: result.tokenTimings.map { (text: $0.token, p: $0.confidence) }),
+            terms: biasTerms) {
+            dictationLog.info("Parakeet (boosted): fixed \(fixed.changes.count) unsure name(s)")
+            NameFixLog.record(fixed.changes, engine: "Parakeet boosted")
+            return (fixed.text, confidence)
+        }
+        return (text, confidence)
     }
 
     /// Feeds a complete recording through the EOU streaming pipeline as one
@@ -647,7 +704,7 @@ final class ParakeetEngine {
     /// EOU, direct testing found no tail-truncation on any of three
     /// tested recordings (5-21s) — see `availableModels`'s doc comment for
     /// the actual measurements this is built on.
-    private func transcribeWithNemotron(fileAt url: URL) async throws -> String {
+    private func transcribeWithNemotron(fileAt url: URL) async throws -> (text: String, words: [UnsureWordFix.Word]) {
         let manager = try await nemotronAsrManager()
         await manager.reset()
 
@@ -663,8 +720,10 @@ final class ParakeetEngine {
 
         try await manager.appendAudio(buffer)
         try await manager.processBufferedAudio()
-        let text = try await manager.finish()
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // With each token's timing and confidence, for the unsure-word name fix — same text as `finish()`.
+        let (text, timings) = try await manager.finishWithTokenTimings()
+        return (text.trimmingCharacters(in: .whitespacesAndNewlines),
+                UnsureWordFix.words(fromPieces: timings.map { (text: $0.token, p: $0.confidence) }))
     }
 
     private static func version(for model: String) -> AsrModelVersion {

@@ -36,28 +36,17 @@ struct DictionaryPage: View {
             ThinScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     header
-                    tipBanner
-                        .padding(.top, 18)
-                    searchBar
-                        .padding(.top, 16)
-                    listCard
-                        .padding(.top, 14)
-
-                    if addingNew {
-                        EditPairRow(
-                            fromPlaceholder: "Say this…",
-                            toPlaceholder: "Get this instead",
-                            from: $draftFrom, to: $draftTo,
-                            onSave: { commitNew() },
-                            onCancel: { addingNew = false })
-                            .padding(.top, 10)
+                    if rows.isEmpty && !addingNew {
+                        emptyCard
+                            .padding(.top, 24)
                     } else {
-                        addRowButton
-                            .padding(.top, 10)
+                        toolbar
+                            .padding(.top, 24)
+                        listCard
+                            .padding(.top, 16)
                     }
-
                     relatedLink
-                        .padding(.top, 14)
+                        .padding(.top, 16)
                 }
             }
         }
@@ -70,122 +59,140 @@ struct DictionaryPage: View {
                 .font(.manrope(22, .medium))
                 .tracking(-0.33)
                 .foregroundStyle(Palette.warmInk)
-            Text("Spoken phrases replaced in every transcript.")
+            // The old tip card ("say it roughly right…") folded into the
+            // subtitle — it was a white card as heavy as real content.
+            Text("Names and jargon Murmur should always write your way. Say them roughly "
+                 + "right — it matches by sound, anywhere in a sentence.")
                 .font(.manrope(12.5))
+                .lineSpacing(2)
                 .foregroundStyle(Palette.warmInkFaint)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var tipBanner: some View {
-        HStack(alignment: .top, spacing: 8) {
-            MurmurIconView(icon: .help)
-                .frame(width: 13, height: 13)
-                .foregroundStyle(Palette.warmInkSoft)
-                .padding(.top, 1)
-            Text("Say it roughly right — Murmur matches by sound, not exact wording, "
-                 + "and swaps in the correction anywhere it lands in a sentence.")
+    /// The first thing a new user sees: one card that says what this page
+    /// is for, shows it with two real examples in the actual row layout,
+    /// and offers the one action that matters — instead of a tip card, an
+    /// empty search bar, an empty box and a dashed add row stacked up.
+    private var emptyCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Teach Murmur your words")
+                .font(.manrope(15, .semibold))
+                .foregroundStyle(Palette.warmInk)
+            Text("Add a name, a product, or a term it keeps getting wrong — every transcript "
+                 + "from then on gets it right.")
                 .font(.manrope(12.5))
-                .lineSpacing(3)
+                .lineSpacing(2)
                 .foregroundStyle(Palette.warmInkSoft)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private var searchBar: some View {
-        HStack {
-            HStack(spacing: 8) {
-                MurmurIconView(icon: .search)
-                    .frame(width: 13, height: 13)
-                    .foregroundStyle(Palette.warmInkFaint)
-                TextField("Search words and phrases…", text: $searchText)
-                    .textFieldStyle(.plain)
-                    .font(.manrope(12.5))
-                    .foregroundStyle(Palette.warmInk)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
+            VStack(alignment: .leading, spacing: 0) {
+                DictColumnLabels()
+                DictListRow(from: "super base", to: "Supabase", isFirst: true, onEdit: {}, onDelete: {})
+                DictListRow(from: "yanis", to: "Jānis", isFirst: false, onEdit: {}, onDelete: {})
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: Radius.sm))
-            .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmRowBorder, lineWidth: 1))
-            .frame(width: 260)
+            .opacity(0.55)
+            .allowsHitTesting(false)
+            .padding(.top, 20)
+            HStack(spacing: 12) {
+                Button(action: startAdding) {
+                    PrimaryActionLabel(title: "Add your first word")
+                }
+                .buttonStyle(PressScaleButtonStyle(scale: 0.97))
+                Text("Examples — not saved")
+                    .font(.manrope(11.5))
+                    .foregroundStyle(Palette.warmInkFaint)
+            }
+            .padding(.top, 20)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    /// Search (its placeholder carries the count) and the primary add
+    /// action. Search only exists once there's something to search.
+    private var toolbar: some View {
+        HStack(spacing: 12) {
+            if !rows.isEmpty {
+                HStack(spacing: 8) {
+                    MurmurIconView(icon: .search)
+                        .frame(width: 13, height: 13)
+                        .foregroundStyle(Palette.warmInkFaint)
+                    TextField("Search \(rows.count) \(rows.count == 1 ? "word" : "words")", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.manrope(12.5))
+                        .foregroundStyle(Palette.warmInk)
+                }
+                .padding(.horizontal, 10)
+                .frame(width: 240, height: 32)
+                .background(Palette.panel, in: RoundedRectangle(cornerRadius: Radius.sm))
+                .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmRowBorder, lineWidth: 1))
+            }
             Spacer()
-            Text(countLabel)
-                .font(.manrope(11.5))
-                .foregroundStyle(Palette.warmInkFaint)
+            Button(action: startAdding) {
+                PrimaryActionLabel(title: "Add word")
+            }
+            .buttonStyle(PressScaleButtonStyle(scale: 0.97))
+            .disabled(addingNew)
         }
     }
 
     private var listCard: some View {
-        Group {
-            if visibleRows.isEmpty {
-                Text(rows.isEmpty
-                     ? "No words yet — add the names and jargon Murmur keeps getting wrong."
-                     : "No matches.")
+        VStack(alignment: .leading, spacing: 0) {
+            DictColumnLabels()
+            // New words are typed in place, at the top of the list.
+            if addingNew {
+                EditPairRow(
+                    fromPlaceholder: "Say this…",
+                    toPlaceholder: "Get this instead",
+                    from: $draftFrom, to: $draftTo,
+                    onSave: { commitNew() },
+                    onCancel: { addingNew = false })
+            }
+            if visibleRows.isEmpty && !rows.isEmpty {
+                Text("No words match \u{201c}\(searchText)\u{201d}.")
                     .font(.manrope(12.5))
                     .italic()
                     .foregroundStyle(Palette.warmInkFaint)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 24)
-                    .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            } else {
-                VStack(spacing: 0) {
-                    ForEach(Array(visibleRows.enumerated()), id: \.element.id) { index, row in
-                        if editingID == row.id {
-                            EditPairRow(
-                                fromPlaceholder: "Say this…",
-                                toPlaceholder: "Get this instead",
-                                from: $draftFrom, to: $draftTo,
-                                onSave: { commitEdit(row) },
-                                onCancel: { editingID = nil })
-                        } else {
-                            DictListRow(
-                                from: row.spoken, to: row.replacement,
-                                onEdit: {
-                                    draftFrom = row.spoken
-                                    draftTo = row.replacement
-                                    editingID = row.id
-                                },
-                                onDelete: {
-                                    rows.removeAll { $0.id == row.id }
-                                    save()
-                                })
-                        }
-                        if index != visibleRows.count - 1 {
-                            Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
-                        }
-                    }
+                    .padding(.vertical, 20)
+            }
+            ForEach(Array(visibleRows.enumerated()), id: \.element.id) { index, row in
+                if editingID == row.id {
+                    EditPairRow(
+                        fromPlaceholder: "Say this…",
+                        toPlaceholder: "Get this instead",
+                        from: $draftFrom, to: $draftTo,
+                        onSave: { commitEdit(row) },
+                        onCancel: { editingID = nil })
+                } else {
+                    DictListRow(
+                        from: row.spoken, to: row.replacement,
+                        isFirst: index == 0 && !addingNew,
+                        onEdit: {
+                            draftFrom = row.spoken
+                            draftTo = row.replacement
+                            editingID = row.id
+                        },
+                        onDelete: {
+                            rows.removeAll { $0.id == row.id }
+                            save()
+                        })
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 2)
-                .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
             }
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
-    private var addRowButton: some View {
-        Button {
-            draftFrom = ""
-            draftTo = ""
-            addingNew = true
-        } label: {
-            HStack(spacing: 8) {
-                MurmurIconView(icon: .plus).frame(width: 13, height: 13)
-                Text("Add word or phrase").font(.manrope(12.5, .semibold))
-            }
-            .foregroundStyle(Palette.warmInkSoft)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Radius.sm)
-                    .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
-                    .foregroundStyle(Palette.warmDivider))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PressScaleButtonStyle(scale: 0.98))
+    private func startAdding() {
+        draftFrom = ""
+        draftTo = ""
+        editingID = nil
+        addingNew = true
     }
 
     private var relatedLink: some View {
@@ -218,11 +225,6 @@ struct DictionaryPage: View {
         return rows.filter {
             $0.spoken.lowercased().contains(term) || $0.replacement.lowercased().contains(term)
         }
-    }
-
-    private var countLabel: String {
-        let n = rows.count
-        return "\(n) \(n == 1 ? "entry" : "entries")"
     }
 
     private func commitEdit(_ row: DictionaryRow) {
@@ -268,12 +270,34 @@ struct DictionaryRow: Identifiable {
     var replacement: String
 }
 
-// MARK: - Shared row views
+// MARK: - Row views
 
-/// A read-only "spoken → replacement" row with hover-revealed actions.
+/// "YOU SAY" / "MURMUR WRITES" over the two columns — the same small
+/// uppercase label style as Home's day labels.
+struct DictColumnLabels: View {
+    var body: some View {
+        HStack(spacing: 16) {
+            Text("YOU SAY").frame(maxWidth: .infinity, alignment: .leading)
+            Color.clear.frame(width: 12, height: 1)
+            Text("MURMUR WRITES").frame(maxWidth: .infinity, alignment: .leading)
+            Color.clear.frame(width: 54, height: 1)
+        }
+        .font(.manrope(10, .semibold))
+        .kerning(0.9)
+        .foregroundStyle(Palette.warmInkSoft)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 4)
+    }
+}
+
+/// A "spoken → replacement" pair. Both sides share the width equally (the
+/// spoken side used to be a fixed 140pt and cut longer phrases off); the
+/// replacement is bold because it's what matters. Edit/delete on hover,
+/// on the same translucent wash as every other list in the app.
 struct DictListRow: View {
     let from: String
     let to: String
+    var isFirst: Bool = false
     let onEdit: () -> Void
     let onDelete: () -> Void
 
@@ -284,37 +308,46 @@ struct DictListRow: View {
             Text(from)
                 .font(.manrope(13))
                 .foregroundStyle(Palette.warmInkSoft)
-                .frame(width: 140, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            MurmurIconView(icon: .arrowRight)
+                .frame(width: 12, height: 12)
+                .foregroundStyle(Palette.warmInkFainter)
+            Text(to)
+                .font(.manrope(13, .semibold))
+                .foregroundStyle(Palette.warmInk)
+                .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 6) {
-                Text("→").foregroundStyle(Palette.warmInkFaint)
-                Text(to)
-                    .font(.manrope(13, .medium))
-                    .foregroundStyle(Palette.warmInk)
-            }
-            .font(.manrope(13))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            HStack(spacing: 6) {
-                IconButton(icon: .edit, size: 22, iconSize: 12, help: "Edit", action: onEdit)
-                IconButton(icon: .trash, size: 22, iconSize: 12, help: "Delete", action: onDelete)
+                IconButton(icon: .edit, size: 24, iconSize: 12, hoverFill: Palette.hoverWash,
+                           help: "Edit", action: onEdit)
+                IconButton(icon: .trash, size: 24, iconSize: 12, hoverFill: Palette.hoverWash,
+                           help: "Delete", action: onDelete)
             }
             .opacity(hovering ? 1 : 0)
-            .animation(.easeOut(duration: 0.1), value: hovering)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 15)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 13)
         .background(
             RoundedRectangle(cornerRadius: Radius.sm)
-                .fill(hovering ? Palette.warmRowBorder : Color.clear))
-        // See HomeView.swift's historyRow for why this is needed: a .clear
+                .fill(hovering ? Palette.hoverWash : Color.clear))
+        .overlay(alignment: .top) {
+            if !isFirst {
+                Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
+                    .padding(.horizontal, 10)
+                    .opacity(hovering ? 0 : 1)
+            }
+        }
+        // See HomeView.swift's history row for why this is needed: a .clear
         // background makes SwiftUI treat the row's empty space as outside
         // the hoverable region until this forces the whole padded frame to
         // count, regardless of what's actually drawn there.
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.1), value: hovering)
     }
 }
 
-/// The inline add/edit form used by Dictionary.
+/// The inline add/edit row — the same two columns as `DictListRow`, with
+/// the first field focused as soon as it appears.
 struct EditPairRow: View {
     let fromPlaceholder: String
     let toPlaceholder: String
@@ -323,32 +356,39 @@ struct EditPairRow: View {
     let onSave: () -> Void
     let onCancel: () -> Void
 
+    @FocusState private var fromFocused: Bool
+
     var body: some View {
-        HStack(spacing: 8) {
-            TextField(fromPlaceholder, text: $from)
-                .textFieldStyle(.plain)
-                .font(.manrope(12.5))
-                .foregroundStyle(Palette.warmInk)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(Palette.warmRowBorder, in: RoundedRectangle(cornerRadius: Radius.sm))
-                .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmDivider, lineWidth: 1))
-                .frame(width: 140)
-                .onSubmit(onSave)
-            Text("→").foregroundStyle(Palette.warmInkFaint)
-            TextField(toPlaceholder, text: $to)
-                .textFieldStyle(.plain)
-                .font(.manrope(12.5))
-                .foregroundStyle(Palette.warmInk)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(Palette.warmRowBorder, in: RoundedRectangle(cornerRadius: Radius.sm))
-                .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmDivider, lineWidth: 1))
-                .onSubmit(onSave)
-            IconButton(icon: .check, help: "Save", action: onSave)
-            IconButton(icon: .plus, rotated: true, help: "Cancel", action: onCancel)
+        HStack(spacing: 16) {
+            field(fromPlaceholder, $from)
+                .focused($fromFocused)
+            MurmurIconView(icon: .arrowRight)
+                .frame(width: 12, height: 12)
+                .foregroundStyle(Palette.warmInkFainter)
+            field(toPlaceholder, $to)
+            HStack(spacing: 6) {
+                IconButton(icon: .check, size: 24, iconSize: 12, hoverFill: Palette.hoverWash,
+                           help: "Save", action: onSave)
+                IconButton(icon: .plus, size: 24, iconSize: 12, rotated: true, hoverFill: Palette.hoverWash,
+                           help: "Cancel", action: onCancel)
+            }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 9)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .onAppear { fromFocused = true }
+        .onExitCommand(perform: onCancel)
+    }
+
+    private func field(_ placeholder: String, _ text: Binding<String>) -> some View {
+        TextField(placeholder, text: text)
+            .textFieldStyle(.plain)
+            .font(.manrope(13))
+            .foregroundStyle(Palette.warmInk)
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .background(Palette.warmRowBorder, in: RoundedRectangle(cornerRadius: Radius.sm))
+            .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmDivider, lineWidth: 1))
+            .frame(maxWidth: .infinity)
+            .onSubmit(onSave)
     }
 }

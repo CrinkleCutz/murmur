@@ -19,12 +19,8 @@ struct DailyPipelineStats: Codable {
 /// itself.
 final class PipelineStatsStore {
     private(set) var days: [DailyPipelineStats] = []
-    /// Generous compared to `HistoryStore`'s 30-day cap: a day's entry here
-    /// is three integers, not full transcript text, so keeping roughly two
-    /// quarters of history costs nothing and lets Insights show a real
-    /// monthly (or longer) total without the underlying data having
-    /// already aged out.
-    private let retentionDays = 180
+    // Kept indefinitely (it used to prune at 180 days): a day here is three
+    // integers, and Insights' "All" range should mean all.
     private var fileURL: URL {
         AppPaths.supportDirectory.appendingPathComponent("pipeline_stats.json")
     }
@@ -33,8 +29,6 @@ final class PipelineStatsStore {
         if let data = try? Data(contentsOf: fileURL),
            let saved = try? JSONDecoder().decode([DailyPipelineStats].self, from: data) {
             days = saved
-            prune()
-            save()
         }
     }
 
@@ -54,27 +48,18 @@ final class PipelineStatsStore {
                 date: today, harperFixes: harperFixes, dictionaryFixes: dictionaryFixes,
                 snippetExpansions: snippetExpansions))
         }
-        prune()
         save()
     }
 
-    /// Summed counts for the last `days` days, inclusive of today — what
-    /// Insights' "Fixes made by Murmur" card actually reads.
-    func totals(lastDays days: Int) -> DailyPipelineStats {
-        guard let cutoff = Calendar.current.date(byAdding: .day, value: -days, to: Date())
-        else { return DailyPipelineStats(date: Date()) }
-        let inRange = self.days.filter { $0.date >= Calendar.current.startOfDay(for: cutoff) }
+    /// Summed counts from `start` (a day's start) through today — what
+    /// Insights' "Fixes made by Murmur" card reads for its selected range.
+    func totals(from start: Date) -> DailyPipelineStats {
+        let inRange = days.filter { $0.date >= start }
         return DailyPipelineStats(
             date: Date(),
             harperFixes: inRange.reduce(0) { $0 + $1.harperFixes },
             dictionaryFixes: inRange.reduce(0) { $0 + $1.dictionaryFixes },
             snippetExpansions: inRange.reduce(0) { $0 + $1.snippetExpansions })
-    }
-
-    private func prune() {
-        guard let cutoff = Calendar.current.date(byAdding: .day, value: -retentionDays, to: Date())
-        else { return }
-        days.removeAll { $0.date < cutoff }
     }
 
     private func save() {
@@ -102,22 +87,5 @@ enum PipelineDiff {
         var changed = abs(beforeWords.count - afterWords.count)
         for i in 0..<overlap where beforeWords[i] != afterWords[i] { changed += 1 }
         return changed
-    }
-
-    /// How many of `snippets`' own trigger phrases actually appear in
-    /// `text` — checked against the text *before* `SnippetStore.expand`
-    /// runs, using the exact same whole-word, case-insensitive pattern
-    /// `expand` itself matches with, so this counts real expansions, not
-    /// coincidental substring hits.
-    static func snippetMatchCount(in text: String, snippets: [Snippet]) -> Int {
-        var count = 0
-        for snippet in snippets {
-            let trigger = snippet.trigger.trimmingCharacters(in: .whitespaces)
-            guard !trigger.isEmpty else { continue }
-            let escaped = NSRegularExpression.escapedPattern(for: trigger)
-            guard let regex = try? NSRegularExpression(pattern: "(?i)\\b\(escaped)\\b") else { continue }
-            count += regex.numberOfMatches(in: text, range: NSRange(text.startIndex..., in: text))
-        }
-        return count
     }
 }

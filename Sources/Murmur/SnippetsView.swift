@@ -2,25 +2,40 @@ import SwiftUI
 
 // MARK: - Snippets
 //
-// Redesigned per the "Main" canvas (Snippets.dc.html): same `GlassPanelPage`
-// shell as Dictionary, warm palette instead of the shared dynamic
-// `Palette`. Functionally unchanged — searchable list with a live count
-// and inline add/edit/delete.
-//
-// The tip banner, search field, add-row button, and related-link row are
-// bespoke to this page rather than the shared `PageTip`/`SearchField`/
-// `AddRowButton`/`RelatedLink` components, matching Dictionary's own
-// reasoning: those are still tuned for the old dynamic/lime palette and
-// shared with pages that haven't been redesigned yet.
+// Same structure as the Dictionary (it's the same shape of page — you say
+// one thing, Murmur writes another): an intro card whose examples are real
+// starting points when empty; otherwise search + "Add snippet" and a list
+// with "YOU SAY / MURMUR PASTES" columns and use counts. Adding and editing
+// open the New snippet sheet (`SnippetEditorSheet`), which replaced the
+// inline row on 2026-10-01. White cards only — the orange hero card is
+// Home's alone.
 
 struct SnippetsPage: View {
     @Binding var page: Page
     @State private var snippets: [Snippet] = []
     @State private var searchText = ""
-    @State private var editingID: UUID?
-    @State private var draftTrigger = ""
-    @State private var draftExpansion = ""
-    @State private var addingNew = false
+    @State private var editor: EditorTarget?
+
+    /// What the sheet opens on: a saved snippet, a starter, or a blank one.
+    private struct EditorTarget: Identifiable {
+        let id = UUID()
+        var existing: Snippet?
+        var starter: (trigger: String, expansion: String)?
+    }
+
+    /// The starters on the empty page: things typed the same way every time. Plain words a recognizer hears
+    /// reliably ("my calendar link", not a brand like "calendly", which came back as "calendar day"). The old
+    /// "tighten this up" (an instruction) and "standup update" (blanks to fill in) went: an instruction is what the
+    /// clean-up used to delete, and blanks are what Templates are for.
+    private static var starters: [(trigger: String, expansion: String)] {
+        let firstName = NSFullUserName().split(separator: " ").first.map(String.init) ?? ""
+        return [
+            ("my calendar link", "https://cal.com/yourname/30min"),
+            ("my address", "14 Elm Road\nLondon N1 7GU"),
+            ("my sign-off", "Best regards," + (firstName.isEmpty ? "" : "\n\(firstName)")),
+            ("today’s date", SnippetStore.Value.date.token),
+        ]
+    }
 
     var body: some View {
         GlassPanelPage {
@@ -31,29 +46,27 @@ struct SnippetsPage: View {
             ThinScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     header
-                    hero
-                        .padding(.top, 18)
-                    tipBanner
-                        .padding(.top, 16)
-                    searchBar
-                        .padding(.top, 16)
-                    listCard
-                        .padding(.top, 14)
-
-                    if addingNew {
-                        snippetEditRow(onSave: commitNew, onCancel: { addingNew = false })
-                            .padding(.top, 10)
+                    if snippets.isEmpty {
+                        introCard
+                            .padding(.top, 24)
                     } else {
-                        addRowButton
-                            .padding(.top, 10)
+                        toolbar
+                            .padding(.top, 24)
+                        listCard
+                            .padding(.top, 16)
                     }
-
                     relatedLink
-                        .padding(.top, 14)
+                        .padding(.top, 16)
                 }
             }
         }
         .onAppear { snippets = SnippetStore.load() }
+        .sheet(item: $editor) { target in
+            SnippetEditorSheet(existing: target.existing, starter: target.starter) {
+                editor = nil
+                snippets = SnippetStore.load()
+            }
+        }
     }
 
     private var header: some View {
@@ -62,222 +75,110 @@ struct SnippetsPage: View {
                 .font(.manrope(22, .medium))
                 .tracking(-0.33)
                 .foregroundStyle(Palette.warmInk)
-            Text("Say a trigger phrase, get a saved block pasted instead.")
+            // The old tip card (say the trigger exactly…) folded in here.
+            Text("Say a phrase anywhere in a dictation, and Murmur pastes your saved text in its place.")
                 .font(.manrope(12.5))
                 .foregroundStyle(Palette.warmInkFaint)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Teaches by example rather than by the tip banner's one sentence
-    /// alone — a new user staring at an empty list has no real sense of
-    /// what's worth saving. Three deliberately different use cases, not
-    /// three variations on "an address": a link, a reusable AI-prompt
-    /// opener (the one genuinely non-obvious idea — a snippet doesn't have
-    /// to be a fact, it can be an instruction you say before dictating
-    /// into Ask Murmur or any other AI chat), and a boilerplate template.
-    /// Solid `sunset` fill, no shadow — same call as Scratchpad's own hero,
-    /// the closer sibling to this "explain a tool, then list what it's
-    /// made" page than Notetaker's own (which does carry a shadow).
-    private var hero: some View {
-        VStack(alignment: .leading, spacing: 14) {
+    /// The empty page: one white card (the orange hero card is Home's
+    /// alone) whose examples are real starting points — "Use" opens the
+    /// sheet already filled in, to adjust before saving.
+    private var introCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
             Text("Say it once, never type it again")
-                .font(.manrope(19, .medium))
-                .tracking(-0.2)
-                .foregroundStyle(.white)
-            Text("Save an address, a canned reply, even a reusable AI prompt — say the "
-                 + "trigger phrase mid-dictation and Murmur drops in the full text.")
+                .font(.manrope(15, .semibold))
+                .foregroundStyle(Palette.warmInk)
+            Text("Links, addresses, a sign-off: anything you’d otherwise type the same way every time. Start from "
+                 + "one of these. You can edit it before it’s saved.")
                 .font(.manrope(12.5))
-                .foregroundStyle(.white.opacity(0.85))
-                .lineSpacing(3)
+                .lineSpacing(2)
+                .foregroundStyle(Palette.warmInkSoft)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 460, alignment: .leading)
-            // A real saved snippet's row (`SnippetRow`, below) uses this
-            // exact same chip-pair shape — without this label, nothing
-            // told the two apart, and these three read as if they were
-            // already active rather than illustrative. None of them do
-            // anything until you've actually created a snippet with that
-            // trigger yourself.
-            Text("TRY SOMETHING LIKE")
-                .font(.manrope(10, .bold))
-                .kerning(0.8)
-                .foregroundStyle(.white.opacity(0.6))
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 8) {
-                exampleRow(trigger: "my calendly", expansion: "https://calendly.com/yourname/30min")
-                exampleRow(trigger: "tighten this up",
-                           expansion: "Rewrite the following to be more concise and direct:")
-                exampleRow(trigger: "standup update",
-                           expansion: "Yesterday I worked on ___. Today: ___. No blockers.")
+                .padding(.top, 6)
+            VStack(alignment: .leading, spacing: 0) {
+                SnippetColumnLabels()
+                ForEach(Array(Self.starters.enumerated()), id: \.offset) { index, starter in
+                    SnippetRow(
+                        trigger: starter.trigger, expansion: starter.expansion, useCount: 0,
+                        isFirst: index == 0,
+                        trailing: .use { editor = EditorTarget(starter: starter) })
+                }
             }
-            .padding(.top, 2)
+            .padding(.top, 18)
+            Button { editor = EditorTarget() } label: {
+                PrimaryActionLabel(title: "Add your own")
+            }
+            .buttonStyle(PressScaleButtonStyle(scale: 0.97))
+            .padding(.top, 20)
         }
         .padding(24)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Palette.sunset, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
-    private func exampleRow(trigger: String, expansion: String) -> some View {
-        HStack(spacing: 8) {
-            Text(trigger)
-                .font(.manrope(11.5, .semibold))
-                .foregroundStyle(Palette.warmInk)
+    /// Search (placeholder carries the count; only once there's something
+    /// to search) and the primary add action.
+    private var toolbar: some View {
+        HStack(spacing: 12) {
+            if !snippets.isEmpty {
+                HStack(spacing: 8) {
+                    MurmurIconView(icon: .search)
+                        .frame(width: 13, height: 13)
+                        .foregroundStyle(Palette.warmInkFaint)
+                    TextField("Search \(snippets.count) \(snippets.count == 1 ? "snippet" : "snippets")",
+                              text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.manrope(12.5))
+                        .foregroundStyle(Palette.warmInk)
+                }
                 .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.white, in: RoundedRectangle(cornerRadius: 7))
-            MurmurIconView(icon: .arrowRight)
-                .frame(width: 10, height: 10)
-                .foregroundStyle(.white.opacity(0.6))
-            Text(expansion)
-                .font(.manrope(11.5))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 7))
-                .frame(maxWidth: 320, alignment: .leading)
-        }
-    }
-
-    private var tipBanner: some View {
-        HStack(alignment: .top, spacing: 8) {
-            MurmurIconView(icon: .help)
-                .frame(width: 13, height: 13)
-                .foregroundStyle(Palette.warmInkSoft)
-                .padding(.top, 1)
-            Text("Say the trigger phrase exactly, ideally as its own pause — snippets "
-                 + "don't fuzzy-match like Dictionary does, so Murmur only expands it when "
-                 + "it hears the whole phrase.")
-                .font(.manrope(12.5))
-                .lineSpacing(3)
-                .foregroundStyle(Palette.warmInkSoft)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private var searchBar: some View {
-        HStack {
-            HStack(spacing: 8) {
-                MurmurIconView(icon: .search)
-                    .frame(width: 13, height: 13)
-                    .foregroundStyle(Palette.warmInkFaint)
-                TextField("Search snippets…", text: $searchText)
-                    .textFieldStyle(.plain)
-                    .font(.manrope(12.5))
-                    .foregroundStyle(Palette.warmInk)
+                .frame(width: 240, height: 32)
+                .background(Palette.panel, in: RoundedRectangle(cornerRadius: Radius.sm))
+                .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmRowBorder, lineWidth: 1))
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: Radius.sm))
-            .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmRowBorder, lineWidth: 1))
-            .frame(width: 260)
             Spacer()
-            Text(countLabel)
-                .font(.manrope(11.5))
-                .foregroundStyle(Palette.warmInkFaint)
+            Button { editor = EditorTarget() } label: {
+                PrimaryActionLabel(title: "Add snippet")
+            }
+            .buttonStyle(PressScaleButtonStyle(scale: 0.97))
         }
     }
 
     private var listCard: some View {
-        Group {
-            if visible.isEmpty {
-                Text(snippets.isEmpty
-                     ? "No snippets yet — add signatures, addresses, or canned replies."
-                     : "No matches.")
+        VStack(alignment: .leading, spacing: 0) {
+            SnippetColumnLabels()
+            if visible.isEmpty && !snippets.isEmpty {
+                Text("No snippets match \u{201c}\(searchText)\u{201d}.")
                     .font(.manrope(12.5))
                     .italic()
                     .foregroundStyle(Palette.warmInkFaint)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 24)
-                    .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            } else {
-                VStack(spacing: 0) {
-                    ForEach(Array(visible.enumerated()), id: \.element.id) { index, snippet in
-                        if editingID == snippet.id {
-                            snippetEditRow(onSave: { commitEdit(snippet) },
-                                           onCancel: { editingID = nil })
-                        } else {
-                            SnippetRow(
-                                snippet: snippet,
-                                onEdit: {
-                                    draftTrigger = snippet.trigger
-                                    draftExpansion = snippet.expansion
-                                    editingID = snippet.id
-                                },
-                                onDelete: {
-                                    snippets.removeAll { $0.id == snippet.id }
-                                    save()
-                                })
-                        }
-                        if index != visible.count - 1 {
-                            Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
-                        }
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 2)
-                .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .padding(.vertical, 20)
+            }
+            ForEach(Array(visible.enumerated()), id: \.element.id) { index, snippet in
+                SnippetRow(
+                    trigger: snippet.trigger, expansion: snippet.expansion, useCount: snippet.useCount,
+                    isFirst: index == 0,
+                    trailing: .edit(
+                        onEdit: { editor = EditorTarget(existing: snippet) },
+                        onDelete: {
+                            snippets.removeAll { $0.id == snippet.id }
+                            save()
+                        }))
             }
         }
-    }
-
-    private func snippetEditRow(onSave: @escaping () -> Void, onCancel: @escaping () -> Void) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            TextField("Say this…", text: $draftTrigger)
-                .textFieldStyle(.plain)
-                .font(.manrope(12.5))
-                .foregroundStyle(Palette.warmInk)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(Palette.warmRowBorder, in: RoundedRectangle(cornerRadius: Radius.sm))
-                .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmDivider, lineWidth: 1))
-                .frame(width: 140)
-            Text("→").foregroundStyle(Palette.warmInkFaint).padding(.top, 8)
-            TextEditor(text: $draftExpansion)
-                .font(.manrope(12.5))
-                .foregroundStyle(Palette.warmInk)
-                .scrollContentBackground(.hidden)
-                .padding(6)
-                .frame(minHeight: 60)
-                .background(Palette.warmRowBorder, in: RoundedRectangle(cornerRadius: Radius.sm))
-                .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmDivider, lineWidth: 1))
-            IconButton(icon: .check, help: "Save", action: onSave).padding(.top, 2)
-            IconButton(icon: .plus, rotated: true, help: "Cancel", action: onCancel).padding(.top, 2)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 9)
-    }
-
-    private var addRowButton: some View {
-        Button {
-            draftTrigger = ""
-            draftExpansion = ""
-            addingNew = true
-        } label: {
-            HStack(spacing: 8) {
-                MurmurIconView(icon: .plus).frame(width: 13, height: 13)
-                Text("Add snippet").font(.manrope(12.5, .semibold))
-            }
-            .foregroundStyle(Palette.warmInkSoft)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Radius.sm)
-                    .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
-                    .foregroundStyle(Palette.warmDivider))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(PressScaleButtonStyle(scale: 0.98))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     private var relatedLink: some View {
         HStack(spacing: 4) {
-            Text("Need to reshape what you just said, not insert fixed text?")
+            Text("Need to reshape what you said, not paste fixed text?")
                 .font(.manrope(12))
                 .foregroundStyle(Palette.warmInkSoft)
             Button { page = .templates } label: {
@@ -286,7 +187,7 @@ struct SnippetsPage: View {
                     .foregroundStyle(Palette.sunsetDeep)
             }
             .buttonStyle(.plain)
-            Text("restructure the transcript itself.")
+            Text("do that.")
                 .font(.manrope(12))
                 .foregroundStyle(Palette.warmInkSoft)
         }
@@ -301,28 +202,6 @@ struct SnippetsPage: View {
         }
     }
 
-    private var countLabel: String {
-        "\(snippets.count) \(snippets.count == 1 ? "snippet" : "snippets")"
-    }
-
-    private func commitEdit(_ snippet: Snippet) {
-        guard let index = snippets.firstIndex(where: { $0.id == snippet.id }) else { return }
-        let trigger = draftTrigger.trimmingCharacters(in: .whitespaces)
-        guard !trigger.isEmpty else { editingID = nil; return }
-        snippets[index].trigger = trigger
-        snippets[index].expansion = draftExpansion
-        editingID = nil
-        save()
-    }
-
-    private func commitNew() {
-        let trigger = draftTrigger.trimmingCharacters(in: .whitespaces)
-        guard !trigger.isEmpty, !draftExpansion.isEmpty else { addingNew = false; return }
-        snippets.append(Snippet(trigger: trigger, expansion: draftExpansion))
-        addingNew = false
-        save()
-    }
-
     private func save() {
         SnippetStore.save(snippets.filter {
             !$0.trigger.trimmingCharacters(in: .whitespaces).isEmpty
@@ -330,50 +209,119 @@ struct SnippetsPage: View {
     }
 }
 
+/// "YOU SAY" / "MURMUR PASTES" over the two columns — the Dictionary's
+/// label style.
+private struct SnippetColumnLabels: View {
+    var body: some View {
+        HStack(spacing: 16) {
+            Text("YOU SAY").frame(width: 150, alignment: .leading)
+            Color.clear.frame(width: 12, height: 1)
+            Text("MURMUR PASTES").frame(maxWidth: .infinity, alignment: .leading)
+            Color.clear.frame(width: 60, height: 1)
+        }
+        .font(.manrope(10, .semibold))
+        .kerning(0.9)
+        .foregroundStyle(Palette.warmInkSoft)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 4)
+    }
+}
+
+/// Trigger (in the accent — it's the thing you say) → what gets pasted,
+/// up to two lines. The trailing slot is either a starter's "Use" button
+/// or, for a saved snippet, its use count with edit/delete on hover. The
+/// count stays visible: it's what says whether a snippet earns its keep.
 private struct SnippetRow: View {
-    let snippet: Snippet
-    let onEdit: () -> Void
-    let onDelete: () -> Void
+    enum Trailing {
+        case use(() -> Void)
+        case edit(onEdit: () -> Void, onDelete: () -> Void)
+    }
+
+    let trigger: String
+    let expansion: String
+    let useCount: Int
+    var isFirst: Bool = false
+    let trailing: Trailing
+
     @State private var hovering = false
 
+    /// The saved text as it reads in the list: its lines as lines (two at most), and today's date shown as the date
+    /// it would be today, with a quiet note that it changes.
+    private var shownExpansion: Text {
+        let dateOnly = expansion.trimmingCharacters(in: .whitespaces) == SnippetStore.Value.date.token
+        if dateOnly {
+            return Text(SnippetStore.fill(expansion)).foregroundColor(Palette.warmInk)
+                + Text("  ·  always today’s").foregroundColor(Palette.warmInkFaint)
+        }
+        return Text(expansion).foregroundColor(Palette.warmInk)
+    }
+
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            Text(snippet.trigger)
-                .font(.manrope(13, .medium))
+        HStack(alignment: .center, spacing: 16) {
+            Text(trigger)
+                .font(.manrope(13, .semibold))
                 .foregroundStyle(Palette.sunsetDeep)
-                .frame(width: 140, alignment: .leading)
-            Text(snippet.expansion.replacingOccurrences(of: "\n", with: " "))
+                .frame(width: 150, alignment: .leading)
+            MurmurIconView(icon: .arrowRight)
+                .frame(width: 12, height: 12)
+                .foregroundStyle(Palette.warmInkFainter)
+            shownExpansion
                 .font(.manrope(13))
-                .foregroundStyle(Palette.warmInk)
+                .lineSpacing(2)
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            // Always visible, not hover-only like the actions beside it —
-            // this is the one thing on the row that says whether a
-            // snippet is actually earning its keep, not just a control to
-            // reveal on demand.
-            if snippet.useCount > 0 {
-                Text("\(snippet.useCount) \(snippet.useCount == 1 ? "use" : "uses")")
-                    .font(.manrope(11))
-                    .foregroundStyle(Palette.warmInkFaint)
-                    .frame(width: 46, alignment: .trailing)
+            Group {
+                switch trailing {
+                case .use(let action):
+                    Button(action: action) {
+                        Text("Use")
+                            .font(.manrope(12.5, .semibold))
+                            .foregroundStyle(Palette.warmInk)
+                            .padding(.horizontal, 12)
+                            .frame(height: 28)
+                            .background(Palette.panel, in: RoundedRectangle(cornerRadius: Radius.sm))
+                            .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmDivider, lineWidth: 1))
+                    }
+                    .buttonStyle(PressScaleButtonStyle(scale: 0.96))
+                case .edit(let onEdit, let onDelete):
+                    ZStack(alignment: .trailing) {
+                        if useCount > 0 {
+                            Text("\(useCount) \(useCount == 1 ? "use" : "uses")")
+                                .font(.manrope(11))
+                                .foregroundStyle(Palette.warmInkFaint)
+                                .opacity(hovering ? 0 : 1)
+                        }
+                        HStack(spacing: 4) {
+                            IconButton(icon: .edit, size: 24, iconSize: 12, hoverFill: Palette.hoverWash,
+                                       help: "Edit", action: onEdit)
+                            IconButton(icon: .trash, size: 24, iconSize: 12, hoverFill: Palette.hoverWash,
+                                       help: "Delete", action: onDelete)
+                        }
+                        .opacity(hovering ? 1 : 0)
+                    }
+                }
             }
-            HStack(spacing: 6) {
-                IconButton(icon: .edit, size: 22, iconSize: 12, help: "Edit", action: onEdit)
-                IconButton(icon: .trash, size: 22, iconSize: 12, help: "Delete", action: onDelete)
-            }
-            .opacity(hovering ? 1 : 0)
-            .animation(.easeOut(duration: 0.1), value: hovering)
+            .frame(width: 60, alignment: .trailing)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 15)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 12)
+        .frame(minHeight: 52)
         .background(
             RoundedRectangle(cornerRadius: Radius.sm)
-                .fill(hovering ? Palette.warmRowBorder : Color.clear))
-        // See HomeView.swift's historyRow for why this is needed: a .clear
+                .fill(hovering ? Palette.hoverWash : Color.clear))
+        .overlay(alignment: .top) {
+            if !isFirst {
+                Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
+                    .padding(.horizontal, 10)
+                    .opacity(hovering ? 0 : 1)
+            }
+        }
+        // See HomeView.swift's history row for why this is needed: a .clear
         // background makes SwiftUI treat the row's empty space as outside
         // the hoverable region until this forces the whole padded frame to
         // count, regardless of what's actually drawn there.
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.1), value: hovering)
     }
 }

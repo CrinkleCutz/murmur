@@ -221,13 +221,12 @@ private struct ScratchpadPanelView: View {
             }
         }
         .frame(width: 480, height: 440)
-        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white))
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Palette.panel))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         // `0 20px 40px rgba(20,20,19,.32)` — same shadow spec as the nav
         // bar HUD's own `NavPopover` (NavBarHUD.swift), the other floating
         // card in this app that isn't docked flat against a page.
         .shadow(color: .black.opacity(0.32), radius: 20, y: 14)
-        .environment(\.colorScheme, .light)
         .onAppear { editorFocused = true }
         .onChange(of: model.activeNoteID) { _, _ in editorFocused = true }
         .onExitCommand(perform: onClose)
@@ -522,7 +521,6 @@ struct ScratchpadHotkeyEditor: View {
         }
         .padding(22)
         .frame(width: 340)
-        .environment(\.colorScheme, .light)
         .onDisappear { capture.stopRecording() }
     }
 
@@ -532,6 +530,6 @@ struct ScratchpadHotkeyEditor: View {
             .foregroundStyle(Palette.warmInk)
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: 5))
+            .background(Palette.panel, in: RoundedRectangle(cornerRadius: 5))
     }
 }

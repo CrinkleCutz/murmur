@@ -25,3 +25,15 @@ scripts/.sherpa_models/
 
 # Xcode-generated SPM state, not the Package.swift-managed sources
 .swiftpm/
+dist/
+
+# Private working material — never part of the public source repo.
+/memory/
+/website/
+/website-explore/
+/website-redesign/
+/research_notes/
+/reports/
+/figma-import/
+/murmur-figma-state.json
+/CLAUDE.md

@@ -141,6 +141,14 @@ final class HotkeyMonitor {
         lastTapEndedAt = nil
     }
 
+    /// A hands-free session started some other way — the nav bar's microphone — so the next press of the key stops it,
+    /// exactly as if it had been double-tapped into.
+    func enterHandsFree() {
+        isHandsFree = true
+        pressStartedAt = nil
+        lastTapEndedAt = nil
+    }
+
     private func keyDown() {
         if isHandsFree {
             // Any press while hands-free stops the session.

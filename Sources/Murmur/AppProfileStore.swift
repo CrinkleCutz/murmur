@@ -48,6 +48,9 @@ struct AppProfile: Codable, Equatable {
     /// specific app without switching your everywhere-else language back
     /// and forth — e.g. Spanish into WhatsApp, English elsewhere.
     var localeIdentifier: String?
+    /// `nil` follows Settings ▸ Dictation ▸ Translate into. A language code translates what's dictated into this app
+    /// into it; "" turns translation off here — see `TranslateInto`.
+    var translateInto: String?
 
     /// A profile with none of the fields below set does nothing; used to
     /// prune empties. A hotkey-only profile (everything else nil) is still
@@ -57,7 +60,7 @@ struct AppProfile: Codable, Equatable {
     var isEmpty: Bool {
         style == nil && templateID == nil && hotkeySlot == nil
             && developerVocabulary == nil && autoPaste == nil
-            && engine == nil && model == nil && localeIdentifier == nil
+            && engine == nil && model == nil && localeIdentifier == nil && translateInto == nil
     }
 }
 
@@ -153,6 +156,12 @@ enum AppProfileStore {
     /// app is often prose that benefits from the same cleanup any other
     /// app gets — auto-silencing it there would be a regression, not a fix.
     static func style(forBundleID bundleID: String?) -> WritingStyle {
+        rewriteStyle(from: effectiveStyle(forBundleID: bundleID))
+    }
+
+    /// The style in force for this app before "Auto" is resolved: the profile's own choice, else Raw for a terminal,
+    /// else the global default.
+    static func effectiveStyle(forBundleID bundleID: String?) -> WritingStyle {
         if let override = profile(forBundleID: bundleID)?.style {
             return override
         }
@@ -160,6 +169,25 @@ enum AppProfileStore {
             return .raw
         }
         return StyleSettings.defaultStyle
+    }
+
+    /// What the rewrite pipeline sees. "Auto" is not a rewrite: it only shapes the finished text afterwards, so the
+    /// cleanup, its guard and everything else read it as "As spoken" and behave exactly as they always have.
+    static func rewriteStyle(from effective: WritingStyle) -> WritingStyle {
+        effective == .auto ? .none : effective
+    }
+
+    /// The kind of place to shape the finished text for when "Auto (match app)" is in effect for this app; nil when it
+    /// isn't, or when the app is not an email or messaging app (which then stays exactly as spoken).
+    /// Uses what key-down read from the app's window (`DestinationDetector`) — Gmail in Chrome is email, Slack on the web
+    /// is messaging — and otherwise what the app alone says.
+    static func autoDestination(forBundleID bundleID: String?) -> Destination? {
+        autoDestination(effective: effectiveStyle(forBundleID: bundleID), bundleID: bundleID,
+                        detected: DestinationDetector.current(for: bundleID))
+    }
+
+    static func autoDestination(effective: WritingStyle, bundleID: String?, detected: Destination? = nil) -> Destination? {
+        effective == .auto ? (detected ?? DestinationShaper.destination(forBundleID: bundleID)) : nil
     }
 
     /// Whether Murmur's built-in developer vocabulary (terms + corrections)
@@ -369,6 +397,13 @@ enum AppProfileStore {
               && conciseWithTone?.contains(WritingStyle.formal.instructions ?? "\0") == true,
               "concise composes with tone rather than replacing it")
 
+        // "Auto (match app)": invisible to the rewrite pipeline, and only active where it was chosen.
+        check(rewriteStyle(from: .auto) == .none, "Auto reads as \"As spoken\" to the rewrite pipeline")
+        check(rewriteStyle(from: .formal) == .formal && rewriteStyle(from: .raw) == .raw, "other styles pass through unchanged")
+        check(autoDestination(effective: .auto, bundleID: "com.apple.mail") == .email, "Auto in Mail shapes for email")
+        check(autoDestination(effective: .auto, bundleID: "com.openai.codex") == nil, "Auto in Codex changes nothing")
+        check(autoDestination(effective: .none, bundleID: "com.apple.mail") == nil, "Mail without Auto changes nothing")
+        check(autoDestination(effective: .formal, bundleID: "com.tinyspeck.slackmacgap") == nil, "an explicit style is never overridden")
         return passed
     }
 }
@@ -457,6 +492,45 @@ enum RewritePlan {
         that was actually said.
         """
 
+    /// Whether the pass is the plain "As spoken" cleanup — the only one whose
+    /// output is held to the words that went in (`LLMEditGuard`). A Style or a
+    /// Template is *meant* to change the wording, and Concise to shorten it.
+    /// What a template gets besides its own instructions (`TemplateEngine`): the app's tone and the Voice Profile —
+    /// the same additions `instructions(template:…)` composes, without the template text itself.
+    static func templateExtras(style: WritingStyle, cleanupLevel: CleanupLevel, voice: VoiceProfile?) -> String? {
+        var parts: [String] = []
+        if let tone = style.instructions {
+            parts.append("Apply this tone throughout, without changing the structure described above: \(tone)")
+        }
+        if cleanupLevel == .concise { parts.append(conciseInstructions) }
+        if let voice {
+            parts.append("For context, the author habitually writes like this: \(voice.voiceContext) Preserve their "
+                + "vocabulary and characteristic phrasing where doing so doesn't conflict with the instructions above.")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "\n\n")
+    }
+
+    static func isPlainCleanup(
+        template: NoteTemplate?, style: WritingStyle, cleanupLevel: CleanupLevel
+    ) -> Bool {
+        template == nil && style == .none && cleanupLevel == .light
+    }
+
+    /// The plain clean-up for a dictation in another language (`CleanupLanguage`): the same light edit, said for
+    /// that language, and told outright to stay in it. What the stricter guard keeps is what this asks for.
+    static func cleanupInstructions(for language: CleanupLanguage.Rules) -> String {
+        let sounds = language.fillers.sorted().prefix(3).map { "\u{201c}\($0)\u{201d}" }.joined(separator: ", ")
+        return """
+            Clean up this dictated transcript. It is in \(language.name): keep it in \(language.name) and never \
+            translate it. Remove hesitation sounds (\(sounds)) and words said twice by mistake, fix punctuation and \
+            capital letters, and fix a wrong word ending or article (for example the case or gender of a noun).
+
+            Keep every other word exactly as it was said: do not replace words with other words, do not drop words, \
+            and do not add anything. This is light editing, not rewriting: keep the same paragraph breaks, add no \
+            quotation marks, headings or formatting, and never reply to the text or describe it.
+            """
+    }
+
     /// Builds the single instruction string for a dictation's rewrite pass.
     ///
     /// The old pipeline ran template *or* style and never both: if an app
@@ -482,9 +556,14 @@ enum RewritePlan {
     /// colours a pass that was already going to happen.
     static func instructions(
         template: NoteTemplate?, style: WritingStyle, cleanupLevel: CleanupLevel = .light,
-        voice: VoiceProfile? = nil
+        voice: VoiceProfile? = nil, language: CleanupLanguage.Rules? = nil
     ) -> String? {
         guard !style.skipsAllProcessing else { return nil }
+        // Another language: only the plain clean-up, worded for it (no English filler examples, no English persona).
+        if let language {
+            return isPlainCleanup(template: template, style: style, cleanupLevel: cleanupLevel)
+                ? cleanupInstructions(for: language) : nil
+        }
 
         let tone = style.instructions
         var base: String

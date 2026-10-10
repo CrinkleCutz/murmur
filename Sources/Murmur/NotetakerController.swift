@@ -25,6 +25,8 @@ final class NotetakerHotkeyMonitor {
 
     func startMonitoring() {
         stopMonitoring()
+        // Hidden build: no global shortcut at all, so ⌥M stays free for whatever else it does on the user's Mac.
+        guard Notetaker.isAvailable else { return }
         monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return }
             let modifiers = event.modifierFlags.intersection(
@@ -120,8 +122,12 @@ final class NotetakerController: ObservableObject {
 
     init() {
         notes = store.notes
-        detector.startWatching()
-        Task { await transcriber.prepareDiarizer() }
+        // Hidden build: no meeting detection (it watches running apps, the mic and the browser tab) and no
+        // speaker-model download — a feature nobody can reach shouldn't run, ask for anything, or fetch anything.
+        if Notetaker.isAvailable {
+            detector.startWatching()
+            Task { await transcriber.prepareDiarizer() }
+        }
         micLivePreview.onUpdate = { [weak self] text in self?.liveTranscriptYou = text }
         systemLivePreview.onUpdate = { [weak self] text in self?.liveTranscriptOthers = text }
     }
@@ -147,7 +153,13 @@ final class NotetakerController: ObservableObject {
     /// voice memo of a call Murmur can't see the other side of, e.g. a
     /// phone call on speaker), just without diarized other-speaker turns.
     func start(app: MeetingApp?) {
-        guard canStart else { return }
+        guard Notetaker.isAvailable, canStart else { return }
+        // Needs an active license in an official release build, like dictation. Silent: this also runs on its own
+        // when a meeting starts, and a sound out of nowhere mid-call would be worse than the note on the page.
+        if let paused = LicenseStore.shared.pausedExplanation {
+            lastError = paused
+            return
+        }
         lastError = nil
         activeApp = app
         capturedCalendarTitle = detector.currentEventTitle()
@@ -491,7 +503,6 @@ struct NotetakerHotkeyEditor: View {
         }
         .padding(22)
         .frame(width: 340)
-        .environment(\.colorScheme, .light)
         .onDisappear { capture.stopRecording() }
     }
 
@@ -501,6 +512,6 @@ struct NotetakerHotkeyEditor: View {
             .foregroundStyle(Palette.warmInk)
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: 5))
+            .background(Palette.panel, in: RoundedRectangle(cornerRadius: 5))
     }
 }

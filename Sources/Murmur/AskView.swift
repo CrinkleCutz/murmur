@@ -27,61 +27,103 @@ struct AskPage: View {
         var sources: [AskMurmur.AskSource] = []
     }
 
-    private let suggestions = [
-        "What did I dictate today?",
-        "Summarize this week",
-        "What tasks or action items did I mention?",
+    /// Label on the chip, and the question it actually asks.
+    private let suggestions: [(icon: MurmurIcon, label: String, question: String)] = [
+        (.calendar, "What did I dictate today?", "What did I dictate today?"),
+        (.lines, "Summarize this week", "Summarize this week"),
+        (.check, "Action items I mentioned", "What tasks or action items did I mention?"),
     ]
+
+    @Namespace private var composerSlot
+    /// The input is a different view in each layout, so switching from the
+    /// empty page to the conversation would drop keyboard focus mid-typing;
+    /// this carries it across, so a follow-up needs no extra click.
+    @FocusState private var composerFocused: Bool
 
     var body: some View {
         GlassPanelPage {
             VStack(spacing: 0) {
-                ScrollViewReader { proxy in
-                    ThinScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            header
+                if app.askTurns.isEmpty {
+                    emptyLayout
+                } else {
+                    conversationLayout
+                }
+            }
+            .animation(.spring(response: 0.42, dampingFraction: 0.88), value: app.askTurns.isEmpty)
+            .onChange(of: app.askTurns.isEmpty) { _, _ in
+                DispatchQueue.main.async { composerFocused = true }
+            }
+        }
+    }
 
-                            if let note = app.rewriteEngine.availabilityNote {
-                                PageTip(text: note)
-                                    .padding(.bottom, 16)
-                            }
-
-                            if app.askTurns.isEmpty {
-                                if app.entries.isEmpty {
-                                    noHistoryNotice
-                                } else {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        Text("Try asking")
-                                            .font(.manrope(12, .semibold))
-                                            .foregroundStyle(Palette.warmInkSoft)
-                                            .padding(.bottom, 2)
-                                        ForEach(suggestions, id: \.self) { suggestion in
-                                            SuggestionChip(text: suggestion) {
-                                                question = suggestion
-                                                ask()
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            ForEach(app.askTurns) { turn in
-                                TurnView(turn: turn, canRegenerate: !app.askThinking) {
-                                    regenerate(turn)
-                                }
-                                .padding(.bottom, 22)
-                                .id(turn.id)
-                            }
-                            Color.clear.frame(height: 1).id("bottom")
-                        }
-                    }
-                    .onChange(of: app.askTurns.count) { _, _ in
-                        withAnimation(.murmurEase()) { proxy.scrollTo("bottom", anchor: .bottom) }
+    /// Before the first question: the input and the prompts together in the
+    /// optical centre (a touch above true centre), the way Spotlight and
+    /// the Mac assistant apps open — not prompts at the top and the input
+    /// 350pt away at the bottom.
+    private var emptyLayout: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            if let note = app.rewriteEngine.availabilityNote {
+                PageTip(text: note)
+            }
+            Spacer(minLength: 24)
+            VStack(spacing: 14) {
+                composer
+                    .matchedGeometryEffect(id: "composer", in: composerSlot)
+                    .frame(maxWidth: 640)
+                if app.entries.isEmpty {
+                    noHistoryNotice.frame(maxWidth: 640)
+                } else {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) { suggestionChips }
+                        VStack(spacing: 8) { suggestionChips }
                     }
                 }
-
-                composer
             }
+            .frame(maxWidth: .infinity)
+            Spacer(minLength: 24)
+            Spacer(minLength: 24)
+        }
+    }
+
+    @ViewBuilder private var suggestionChips: some View {
+        ForEach(suggestions, id: \.label) { suggestion in
+            SuggestionChip(icon: suggestion.icon, text: suggestion.label) {
+                question = suggestion.question
+                ask()
+            }
+        }
+    }
+
+    /// Once there's a conversation: the thread scrolls, the input sits at
+    /// the bottom (it slides there from the centre on the first question).
+    private var conversationLayout: some View {
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ThinScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        header
+                        if let note = app.rewriteEngine.availabilityNote {
+                            PageTip(text: note)
+                                .padding(.bottom, 16)
+                        }
+                        ForEach(app.askTurns) { turn in
+                            TurnView(turn: turn, canRegenerate: !app.askThinking) {
+                                regenerate(turn)
+                            }
+                            .padding(.bottom, 22)
+                            .id(turn.id)
+                        }
+                        Color.clear.frame(height: 1).id("bottom")
+                    }
+                }
+                .onChange(of: app.askTurns.count) { _, _ in
+                    withAnimation(.murmurEase()) { proxy.scrollTo("bottom", anchor: .bottom) }
+                }
+            }
+            composer
+                .matchedGeometryEffect(id: "composer", in: composerSlot)
+                .padding(.top, 10)
         }
     }
 
@@ -91,7 +133,8 @@ struct AskPage: View {
                 .font(.manrope(22, .medium))
                 .tracking(-0.33)
                 .foregroundStyle(Palette.warmInk)
-            Text("Chat over your entire dictation history — on-device, nothing sent anywhere.")
+            // "Recent", not "entire": Ask sees what history keeps (90 days).
+            Text("Ask about your recent dictations and meeting notes — answered on this Mac, nothing sent anywhere.")
                 .font(.manrope(12.5))
                 .foregroundStyle(Palette.warmInkFaint)
                 .fixedSize(horizontal: false, vertical: true)
@@ -118,14 +161,11 @@ struct AskPage: View {
     }
 
     private var composer: some View {
-        // Main.dc.html: `align-items: center` on this row. `.bottom` here
-        // previously aligned the 34pt icon circles to the bottom of the
-        // (taller, ~38pt) text field instead of centering them against
-        // it, which is what actually produced the uneven gap — more space
-        // above the circles than below, since only the *top* difference
-        // was left unaccounted for.
         HStack(alignment: .center, spacing: 6) {
-            TextField("Ask about anything you've dictated…", text: $question, axis: .vertical)
+            // The placeholder says what the tooltip used to hide: in a
+            // dictation app the natural way to ask is to say it.
+            TextField("Ask anything — or hold \(app.hotkey.displayName) and say it",
+                      text: $question, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.manrope(13.5))
                 .foregroundStyle(Palette.warmInk)
@@ -133,51 +173,29 @@ struct AskPage: View {
                 .padding(.vertical, 9)
                 .padding(.leading, 16)
                 .disabled(app.entries.isEmpty)
+                .focused($composerFocused)
                 .onSubmit(ask)
-                // The dedicated mic button this field used to have next
-                // to it was purely decorative — its action was empty, by
-                // design (dictation here is the same global hotkey as
-                // everywhere else, not a second click-to-record control)
-                // — but sitting right beside a *working* send button, a
-                // control that presses like a button and does nothing
-                // read as broken rather than intentional. Removed, with
-                // the hint it carried moved onto the field itself so the
-                // hotkey is still discoverable on hover.
-                .help("Hold \(app.hotkey.displayName) to speak your question")
+            // Shows its real state: a quiet grey arrow while there's nothing
+            // to send, sunset with a white arrow once there is — the one
+            // place on this page orange means "you can act now". (It used
+            // to be an orange arrow always, so it looked ready when empty.)
             Button(action: ask) {
-                // Circle stays the same neutral fill the mic button used
-                // to have — only the glyph itself picks up the accent
-                // orange, always, not just once there's something to
-                // send. `sunsetDeep`, not `sunset`: the latter is tuned
-                // for big saturated fills (the hero gradient, the logo
-                // badge) and reads as washed out at icon scale —
-                // `sunsetDeep` is already this redesign's own answer for
-                // small text/icon accents (stat-strip trends, history
-                // timestamps). No opacity dimming while disabled either —
-                // that was fading the *background* along with the glyph,
-                // so the circle stopped matching the design's own
-                // `#F0EEE7` the moment the field was empty.
                 MurmurIconView(icon: .arrowRight)
                     .frame(width: 15, height: 15)
-                    .foregroundStyle(Palette.sunsetDeep)
+                    .foregroundStyle(canSend ? Color.white : Palette.warmInkFainter)
                     .frame(width: 34, height: 34)
-                    .background(Circle().fill(Palette.warmRowBorder))
+                    .background(Circle().fill(canSend ? Palette.sunset : Palette.warmRowBorder))
+                    .animation(.murmurEase(0.15), value: canSend)
             }
             .buttonStyle(PressScaleButtonStyle(scale: 0.92))
             .disabled(!canSend)
         }
         .padding(6)
-        // Matches the text field's own 16pt *leading* inset (above) on
-        // the trailing side too — without this, the gap after the arrow
-        // circle was just the bare 6pt outer padding, well short of the
-        // 6+16 the text side gets before its own content starts.
-        .padding(.trailing, 16)
         // No drop shadow, by request — same call as Scratchpad's editor
         // card: it read as an odd smear along the bottom edge sitting on
         // the frosted glass panel.
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Palette.warmRowBorder, lineWidth: 1))
-        .padding(.top, 10)
     }
 
     private var canSend: Bool {
@@ -190,6 +208,11 @@ struct AskPage: View {
     private func ask() {
         let submitted = question.trimmingCharacters(in: .whitespaces)
         guard !submitted.isEmpty, !app.askThinking else { return }
+        if let paused = LicenseStore.shared.pausedExplanation {
+            question = ""
+            app.askTurns.append(ChatTurn(question: submitted, answer: paused))
+            return
+        }
         question = ""
         app.askThinking = true
         let conversation = recentConversation()
@@ -198,7 +221,7 @@ struct AskPage: View {
         Task {
             defer { app.askThinking = false }
             let result = try? await AskMurmur.ask(
-                submitted, history: app.entries, meetings: app.notetaker.notes, engine: app.rewriteEngine,
+                submitted, history: app.entries, meetings: Notetaker.isAvailable ? app.notetaker.notes : [], engine: app.rewriteEngine,
                 conversation: conversation, voice: Settings.useVoiceProfile ? app.voiceProfile : nil)
             guard let index = app.askTurns.firstIndex(where: { $0.id == turn.id }) else { return }
             app.askTurns[index].answer = result?.text ?? "Something went wrong answering that — try again."
@@ -211,6 +234,7 @@ struct AskPage: View {
     /// having to retype it. Blocked while another ask is already in
     /// flight, same as the composer's own send button.
     private func regenerate(_ turn: ChatTurn) {
+        guard LicenseStore.shared.pausedExplanation == nil else { return }
         guard !app.askThinking,
               let index = app.askTurns.firstIndex(where: { $0.id == turn.id })
         else { return }
@@ -221,7 +245,7 @@ struct AskPage: View {
         Task {
             defer { app.askThinking = false }
             let result = try? await AskMurmur.ask(
-                turn.question, history: app.entries, meetings: app.notetaker.notes, engine: app.rewriteEngine,
+                turn.question, history: app.entries, meetings: Notetaker.isAvailable ? app.notetaker.notes : [], engine: app.rewriteEngine,
                 conversation: conversation, voice: Settings.useVoiceProfile ? app.voiceProfile : nil)
             guard let idx = app.askTurns.firstIndex(where: { $0.id == turn.id }) else { return }
             app.askTurns[idx].answer = result?.text ?? "Something went wrong answering that — try again."
@@ -246,6 +270,10 @@ private struct TurnView: View {
     let turn: AskPage.ChatTurn
     let canRegenerate: Bool
     let onRegenerate: () -> Void
+
+    /// Copy / paste / ask again appear while the answer is hovered — not as
+    /// a permanent row of icons under every reply of a long conversation.
+    @State private var hoveringAnswer = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -277,11 +305,15 @@ private struct TurnView: View {
                     }
                     .frame(width: 22, height: 22)
                     VStack(alignment: .leading, spacing: 8) {
+                        // 13.5 like the question, and capped at a reading
+                        // width: full-panel lines ran past 150 characters.
                         Text(answer)
-                            .font(.manrope(13))
+                            .font(.manrope(13.5))
+                            .lineSpacing(3)
                             .foregroundStyle(Palette.warmInk)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: 620, alignment: .leading)
                         HStack(spacing: 2) {
                             IconButton(icon: .copy, size: 22, iconSize: 12, help: "Copy") {
                                 let pb = NSPasteboard.general
@@ -297,11 +329,15 @@ private struct TurnView: View {
                             }
                             .disabled(!canRegenerate)
                         }
+                        .opacity(hoveringAnswer ? 1 : 0)
+                        .animation(.easeOut(duration: 0.12), value: hoveringAnswer)
                         if !turn.sources.isEmpty {
                             SourcesDisclosure(sources: turn.sources)
                         }
                     }
                 }
+                .contentShape(Rectangle())
+                .onHover { hoveringAnswer = $0 }
             } else {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -379,29 +415,33 @@ private struct SourcesDisclosure: View {
     }
 }
 
+/// A compact prompt chip under the empty page's input — its own icon per
+/// prompt (the three used to share one chat bubble, which said nothing),
+/// a hairline edge, and the page's hover wash.
 private struct SuggestionChip: View {
+    let icon: MurmurIcon
     let text: String
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
-                MurmurIconView(icon: .ask)
+            HStack(spacing: 7) {
+                MurmurIconView(icon: icon)
                     .frame(width: 12, height: 12)
                     .foregroundStyle(Palette.sunsetDeep)
                 Text(text)
-                    .font(.manrope(12.5))
+                    .font(.manrope(12.5, .medium))
                     .foregroundStyle(Palette.warmInk)
-                Spacer()
+                    .fixedSize()
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(hovering ? Palette.warmRowBorder : Color.white,
-                        in: RoundedRectangle(cornerRadius: Radius.md))
-            .contentShape(Rectangle())
+            .frame(height: 30)
+            .background(hovering ? Palette.warmRowBorder : Palette.panel, in: Capsule())
+            .overlay(Capsule().strokeBorder(Palette.glassDivider, lineWidth: 0.5))
+            .contentShape(Capsule())
         }
-        .buttonStyle(PressScaleButtonStyle(scale: 0.99))
+        .buttonStyle(PressScaleButtonStyle(scale: 0.97))
         .onHover { hovering = $0 }
         .animation(.murmurEase(0.12), value: hovering)
     }

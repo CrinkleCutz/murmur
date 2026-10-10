@@ -5,21 +5,23 @@ import SwiftUI
 //
 // Redesigned per the "Main" canvas (Insights.dc.html): same `GlassPanelPage`
 // shell as Home, warm ink/sunset palette instead of the shared dynamic
-// `Palette`. The line-chart math (monotone interpolation, hover crosshair,
-// end-label placement) is untouched — this is a View-layer rewrite only.
+// `Palette`. The line-chart math (monotone interpolation, hover crosshair)
+// is untouched — this is a View-layer rewrite only.
 //
 // The design replaced the old saturated bar chart with a line + soft area
 // wash (the dataviz rule: "trend over time" is a line, not bars), a 2.5px
-// stroke, recessive hairline gridlines, a direct end-label on the latest
-// point, and a hover crosshair + tooltip (the last two aren't in the static
-// mockup — added because a 7-point chart with no way to read exact values
-// per day is a worse chart, not a more faithful one).
+// stroke, recessive hairline gridlines and a hover crosshair. The value
+// readout (today's, or the hovered day's) sits in the card header, not on
+// the plot: the design's direct end-label and a floating tooltip both got
+// crossed by the curve whenever it moved steeply next to them.
 
 struct InsightsPage: View {
     @ObservedObject var app: AppDelegate
     @State private var hoverIndex: Int?
     @State private var chartMetric: ChartMetric = .words
-    @State private var chartRange: ChartRange = .month
+    /// Scopes the whole Usage tab, not just the chart — remembered, so
+    /// Insights reopens on the range it was left on.
+    @AppStorage("insightsRange") private var chartRange: ChartRange = .month
     @State private var tab: InsightsTab = .usage
 
     enum InsightsTab: CaseIterable {
@@ -42,7 +44,7 @@ struct InsightsPage: View {
         }
     }
 
-    enum ChartRange: CaseIterable {
+    enum ChartRange: String, CaseIterable {
         case week, month, all
         var label: String {
             switch self {
@@ -73,7 +75,7 @@ struct InsightsPage: View {
                         // page with this problem.
                         emptyState.padding(.top, 24)
                     } else {
-                        tabBar.padding(.top, 22)
+                        tabBar.padding(.top, InsightsPage.sectionGap)
 
                         switch tab {
                         case .usage: usageTab
@@ -109,6 +111,14 @@ struct InsightsPage: View {
                 .buttonStyle(.plain)
             }
             Spacer(minLength: 0)
+            // The one period control for everything on the Usage tab —
+            // here at the page level rather than inside the chart card,
+            // where it read as scoping that card alone. Nothing on the
+            // Voice tab depends on a range, so it steps aside there.
+            if tab == .usage {
+                WarmSegmentedPicker(options: ChartRange.allCases, label: \.label, selection: $chartRange)
+                    .padding(.bottom, 8)
+            }
         }
         .overlay(alignment: .bottom) {
             Rectangle().fill(Palette.warmDivider).frame(height: 1)
@@ -121,38 +131,51 @@ struct InsightsPage: View {
             // hairline dividers — no card fill, not three boxed cards.
             Card(flat: true) {
                 HStack(alignment: .top, spacing: 0) {
-                    statTile(.lines, "\(app.entries.count)", "dictations",
+                    statTile(.lines, rangeTotals.dictations.formatted(), "dictations",
                              trend: dictationsTrend, isFirst: true)
-                    statTile(.wave, compact(totalWords), "total words",
+                    statTile(.wave, compact(rangeTotals.words), "words",
                              trend: wordsTrend, isFirst: false)
                     statTile(.calendar, avgWords, "avg words / dictation",
                              trend: nil, isFirst: false)
-                    statTile(.clock, timeSavedLabel, "time saved this week",
+                    statTile(.clock, timeSavedLabel, "time saved",
                              trend: nil, isFirst: false)
                 }
+                // Every tile takes the tallest one's height, so the
+                // dividers run the full strip even beside a tile with no
+                // "vs last week" line.
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.top, 20)
+            .padding(.top, Self.sectionGap)
 
             chartCard
-                .padding(.top, 26)
+                .padding(.top, Self.sectionGap)
 
+            // Both cards end on the same line — the shorter one stretches
+            // to the taller one's natural height (`fixedSize` keeps that
+            // bounded inside the scroll view).
             HStack(alignment: .top, spacing: 20) {
                 fixesCard
                 categoryCard
             }
-            .padding(.top, 20)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, Self.sectionGap)
 
             topAppsCard
-                .padding(.top, 20)
+                .padding(.top, Self.sectionGap)
         }
     }
+
+    /// The one vertical gap between every section on the page — tabs,
+    /// stat strip, chart, card rows — instead of the 20/22/26/16 mix it
+    /// had grown into.
+    static let sectionGap: CGFloat = 24
 
     private var voiceTab: some View {
         VStack(alignment: .leading, spacing: 0) {
             personaCard
-                .padding(.top, 20)
+                .padding(.top, Self.sectionGap)
             factsCard
-                .padding(.top, 16)
+                .padding(.top, Self.sectionGap)
         }
     }
 
@@ -182,16 +205,17 @@ struct InsightsPage: View {
 
     private var chartCard: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center, spacing: 10) {
-                Text(chartMetric == .words ? "Words dictated" : "Speaking pace")
-                    .font(.manrope(13, .semibold))
-                    .foregroundStyle(Palette.warmInk)
+            Text(chartMetric == .words ? "Words dictated" : "Speaking pace")
+                .font(.manrope(13, .semibold))
+                .foregroundStyle(Palette.warmInk)
+            HStack(alignment: .center, spacing: 12) {
+                chartReadout
                 Spacer(minLength: 12)
                 WarmSegmentedPicker(options: ChartMetric.allCases, label: \.label, selection: $chartMetric)
-                WarmSegmentedPicker(options: ChartRange.allCases, label: \.label, selection: $chartRange)
             }
-            TrendChart(points: chartPoints, hoverIndex: $hoverIndex)
-                .padding(.top, 20)
+            .padding(.top, 4)
+            TrendChart(points: chartPoints, knownFrom: chartKnownFrom, hoverIndex: $hoverIndex)
+                .padding(.top, 14)
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 22)
@@ -208,17 +232,37 @@ struct InsightsPage: View {
         // No drop shadow, by request (same call as Scratchpad's editor
         // card and Ask Murmur's composer) — it read as an odd smear along
         // the bottom edge sitting on the frosted glass panel.
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    /// Today's value, or the hovered day's — the chart's one number, kept
+    /// in the header (as Health and Stocks do) rather than drawn on the
+    /// plot, where the curve could run straight through it whenever it
+    /// fell or rose steeply next to the label.
+    private var chartReadout: some View {
+        let points = chartPoints
+        let index = hoverIndex.flatMap { points.indices.contains($0) ? $0 : nil } ?? points.indices.last
+        let unit = chartMetric == .words ? "words" : "wpm"
+        return HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text((index.map { points[$0].value } ?? 0).formatted())
+                .font(.manrope(27))
+                .tracking(-0.54)
+                .monospacedDigit()
+                .foregroundStyle(Palette.warmInk)
+            Text(hoverIndex == nil || index == nil ? "\(unit) today" : "\(unit) on \(points[index!].label)")
+                .font(.manrope(11.5))
+                .foregroundStyle(Palette.warmInkFaint)
+        }
     }
 
     private var topAppsCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .lastTextBaseline) {
-                Text("Top apps this week")
+                Text("Top apps")
                     .font(.manrope(13, .semibold))
                     .foregroundStyle(Palette.warmInk)
                 Spacer()
-                Text("by words dictated")
+                Text("\(periodLabel) · by words")
                     .font(.manrope(11.5))
                     .foregroundStyle(Palette.warmInkFaint)
             }
@@ -244,7 +288,7 @@ struct InsightsPage: View {
         .padding(.horizontal, 24)
         .padding(.vertical, 22)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     /// Counts read from `PipelineStatsStore` — see that type's own header
@@ -252,12 +296,18 @@ struct InsightsPage: View {
     /// stage's existing call site, not a change to what any of the three
     /// stages (Harper, the Dictionary, Snippets) actually do.
     private var fixesCard: some View {
-        let stats = app.pipelineStats.totals(lastDays: 30)
+        let stats = app.pipelineStats.totals(from: rangeStart)
         let total = stats.harperFixes + stats.dictionaryFixes + stats.snippetExpansions
         return VStack(alignment: .leading, spacing: 0) {
-            Text("Fixes made by Murmur")
-                .font(.manrope(13, .semibold))
-                .foregroundStyle(Palette.warmInk)
+            HStack(alignment: .lastTextBaseline) {
+                Text("Fixes made by Murmur")
+                    .font(.manrope(13, .semibold))
+                    .foregroundStyle(Palette.warmInk)
+                Spacer()
+                Text(periodLabel)
+                    .font(.manrope(11.5))
+                    .foregroundStyle(Palette.warmInkFaint)
+            }
             if total == 0 {
                 Text("Nothing to show yet — this fills in as Harper, your Dictionary, "
                      + "and Snippets catch things in new dictations.")
@@ -272,7 +322,7 @@ struct InsightsPage: View {
                         .font(.manrope(27))
                         .tracking(-0.5)
                         .foregroundStyle(Palette.warmInk)
-                    Text("this month")
+                    Text("fixes")
                         .font(.manrope(11.5))
                         .foregroundStyle(Palette.warmInkFaint)
                 }
@@ -294,8 +344,8 @@ struct InsightsPage: View {
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 22)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     /// Not a literal copy of Wispr Flow's own category set — see
@@ -308,7 +358,7 @@ struct InsightsPage: View {
                     .font(.manrope(13, .semibold))
                     .foregroundStyle(Palette.warmInk)
                 Spacer()
-                Text("this week")
+                Text(periodLabel)
                     .font(.manrope(11.5))
                     .foregroundStyle(Palette.warmInkFaint)
             }
@@ -334,140 +384,96 @@ struct InsightsPage: View {
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 22)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
-    /// Reads `app.voiceProfile` — already generated and kept fresh by
-    /// `AppDelegate.refreshVoiceProfileIfDue()` on every dictation, same
-    /// data the dedicated Voice Profile page shows. This card doesn't
-    /// generate anything itself, only displays it alongside the progress
-    /// toward its next refresh.
+    /// The shared persona card (VoicePersonaCard.swift) — the same one the
+    /// Voice Profile page shows, so one persona has one design.
     private var personaCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let profile = app.voiceProfile {
-                let target = profile.wordCountAtGeneration + VoiceProfileStore.refreshThreshold
-                let progress = target > profile.wordCountAtGeneration
-                    ? Double(totalWords - profile.wordCountAtGeneration)
-                        / Double(VoiceProfileStore.refreshThreshold)
-                    : 1
-                HStack {
-                    Text("Voice profile")
-                        .font(.manrope(10.5, .bold))
-                        .kerning(0.6)
-                        .foregroundStyle(Palette.warmInk)
-                    Spacer()
-                    Text("Next update in \(max(target - totalWords, 0)) words")
-                        .font(.manrope(10.5))
-                        .foregroundStyle(Palette.warmInk.opacity(0.6))
-                }
-                GeometryReader { geo in
-                    RoundedRectangle(cornerRadius: 2).fill(.white.opacity(0.35))
-                        .overlay(alignment: .leading) {
-                            RoundedRectangle(cornerRadius: 2).fill(Palette.warmInk)
-                                .frame(width: geo.size.width * CGFloat(min(max(progress, 0), 1)))
-                        }
-                }
-                .frame(height: 4)
-                .padding(.top, 8)
-
-                Text(profile.title)
-                    .font(.manrope(24, .semibold))
-                    .tracking(-0.3)
-                    .foregroundStyle(Palette.warmInk)
-                    .padding(.top, 16)
-                if !profile.summary.isEmpty {
-                    Text(profile.summary)
-                        .font(.manrope(13))
-                        .foregroundStyle(Palette.warmInk.opacity(0.75))
-                        .lineSpacing(3)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: 480, alignment: .leading)
-                        .padding(.top, 8)
-                }
-                if let traits = profile.traits, !traits.isEmpty {
-                    HStack(spacing: 6) {
-                        ForEach(traits, id: \.self) { trait in
-                            Text(trait)
-                                .font(.manrope(11, .medium))
-                                .foregroundStyle(Palette.warmInk)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(Color.white, in: Capsule())
-                        }
-                    }
-                    .padding(.top, 12)
-                }
-            } else {
-                Text("Voice profile")
-                    .font(.manrope(10.5, .bold))
-                    .kerning(0.6)
-                    .foregroundStyle(Palette.warmInk)
-                Text("Keep dictating — Murmur builds this from your own transcripts "
-                     + "once you've dictated at least \(VoiceProfileStore.minimumWords) words.")
-                    .font(.manrope(13))
-                    .foregroundStyle(Palette.warmInk.opacity(0.75))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, 10)
-            }
-        }
-        .padding(.horizontal, 28)
-        .padding(.vertical, 24)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        // Same treatment as Home's own hero (`captureZone`): the bold
-        // sunset-to-light gradient, not a flat pale fill, plus its
-        // shadow — this is Insights' one deliberately elevated "hero"
-        // card, not another flat content card like `chartCard`/
-        // `fixesCard` next to it (those stay shadowless by the page's
-        // usual rule; a hero reads as a hero partly because it doesn't).
-        // Flat, not the gradient — just `sunset`, its own darker stop, as
-        // a solid fill (same call as Scratchpad's and Notetaker's heroes).
-        .background(Palette.sunset, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .shadow(color: .black.opacity(0.04), radius: 1, y: 1)
-        .shadow(color: .black.opacity(0.06), radius: 16, y: 16)
+        VoicePersonaCard(app: app)
     }
 
-    /// Catchphrase, most-used and most-corrected words, and peak time &
-    /// place — real, computed facts, deliberately not padded out to four
-    /// separate cards the way `personaCard` alone would leave this tab
-    /// looking thin next to `usageTab`.
+    /// Catchphrase, most-used and most-corrected words, and peak time —
+    /// real, computed facts, as four cards in the same language as the
+    /// Usage tab's (card title, a note in the corner, the value at the
+    /// stat-number size) instead of a settings-style list with the values
+    /// pushed 700pt away from their labels.
     private var factsCard: some View {
+        let catchphrase = catchphrase
+        let mostUsed = mostUsedWord
+        let mostCorrected = mostCorrectedWord
+        let peak = peakTime
+        return VStack(spacing: 20) {
+            HStack(alignment: .top, spacing: 20) {
+                factCard("Catchphrase",
+                         note: catchphrase.map { "said \($0.count) times" },
+                         value: catchphrase.map { "“\($0.phrase)”" })
+                factCard("Most used word",
+                         note: mostUsed.map { "\($0.count) times" },
+                         value: mostUsed.map { "“\($0.word)”" })
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .top, spacing: 20) {
+                factCard("Most corrected word",
+                         note: mostCorrected.map { $0.times == 1 ? "taught once" : "taught \($0.times) times" },
+                         value: mostCorrected?.word)
+                factCard("Peak time",
+                         note: peak.map { "\($0.count) dictations" },
+                         value: peak?.when) {
+                    if let app = peak?.app {
+                        HStack(spacing: 7) {
+                            if let icon = app.icon {
+                                Image(nsImage: icon).resizable().frame(width: 16, height: 16)
+                            }
+                            Text("usually in \(app.name)")
+                                .font(.manrope(12))
+                                .foregroundStyle(Palette.warmInkSoft)
+                        }
+                        .padding(.top, 8)
+                    }
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func factCard(
+        _ title: String, note: String?, value: String?,
+        @ViewBuilder extra: () -> some View = { EmptyView() }
+    ) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            factRow("Catchphrase", quote: catchphrase, isFirst: true)
-            factRow("Most used word", quote: mostUsedWord, isFirst: false)
-            factRow("Most corrected word", quote: mostCorrectedWord, isFirst: false)
-            factRow("Peak time & place", quote: nil, detail: peakTimeDescription, isFirst: false)
+            HStack(alignment: .lastTextBaseline) {
+                Text(title)
+                    .font(.manrope(13, .semibold))
+                    .foregroundStyle(Palette.warmInk)
+                Spacer()
+                if let note {
+                    Text(note)
+                        .font(.manrope(11.5))
+                        .foregroundStyle(Palette.warmInkFaint)
+                }
+            }
+            if let value {
+                Text(value)
+                    .font(.manrope(27))
+                    .tracking(-0.54)
+                    .foregroundStyle(Palette.warmInk)
+                    .lineLimit(2)
+                    .padding(.top, 14)
+                extra()
+            } else {
+                Text("Not enough data yet")
+                    .font(.manrope(12.5))
+                    .italic()
+                    .foregroundStyle(Palette.warmInkFaint)
+                    .padding(.top, 14)
+            }
         }
         .padding(.horizontal, 24)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-    }
-
-    private func factRow(_ label: String, quote: String?, detail: String? = nil, isFirst: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 16) {
-            Text(label.uppercased())
-                .font(.manrope(11, .semibold))
-                .kerning(0.4)
-                .foregroundStyle(Palette.warmInkFaint)
-                .frame(width: 160, alignment: .leading)
-            if let quote {
-                Text("“\(quote)”")
-                    .font(.manrope(13.5, .semibold))
-                    .foregroundStyle(Palette.warmInk)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .multilineTextAlignment(.trailing)
-            } else {
-                Text(detail ?? "Not enough data yet")
-                    .font(.manrope(13))
-                    .foregroundStyle(Palette.warmInk)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .multilineTextAlignment(.trailing)
-            }
-        }
-        .padding(.vertical, 15)
-        .overlay(alignment: .top) {
-            if !isFirst { Rectangle().fill(Palette.warmRowBorder).frame(height: 1) }
-        }
+        .padding(.vertical, 22)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Palette.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     private func statTile(
@@ -494,19 +500,29 @@ struct InsightsPage: View {
                     .foregroundStyle(Palette.warmInkFaint)
             }
             .padding(.top, 4)
-            if let trend {
-                HStack(spacing: 4) {
-                    MurmurIconView(icon: .arrowRight)
-                        .frame(width: 10, height: 10)
-                        .rotationEffect(.degrees(-45))
-                    Text(trend).font(.manrope(12, .semibold))
+            // Every tile states its period on its third line — the trend
+            // when there's an earlier period to compare against, otherwise
+            // the period itself — so all four read as the same range and
+            // stay the same height.
+            Group {
+                if let trend {
+                    HStack(spacing: 4) {
+                        MurmurIconView(icon: .arrowRight)
+                            .frame(width: 10, height: 10)
+                            .rotationEffect(.degrees(-45))
+                        Text(trend).font(.manrope(12, .semibold))
+                    }
+                    .foregroundStyle(Palette.sunsetDeep)
+                } else {
+                    Text(periodLabel)
+                        .font(.manrope(12))
+                        .foregroundStyle(Palette.warmInkFainter)
                 }
-                .foregroundStyle(Palette.sunsetDeep)
-                .padding(.top, 6)
             }
+            .padding(.top, 6)
         }
         .padding(.trailing, 20)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(.leading, isFirst ? 0 : 20)
         .overlay(alignment: .leading) {
             // Sits exactly on the tile boundary (outside this tile's own
@@ -521,47 +537,62 @@ struct InsightsPage: View {
 
     // MARK: Derived data
 
-    private var totalWords: Int {
-        app.entries.reduce(0) { $0 + $1.wordCount }
+    // Everything on the Usage tab reads one range (`chartRange`) from
+    // `UsageStatsStore`'s lifetime daily totals — never `app.entries`,
+    // which only holds the latest 5,000 dictations / 90 days.
+
+    /// The first day in the selected range. "All" starts at the first day
+    /// the store has anything for.
+    private var rangeStart: Date {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        switch chartRange {
+        case .week: return calendar.date(byAdding: .day, value: -6, to: today)!
+        case .month: return calendar.date(byAdding: .day, value: -29, to: today)!
+        case .all: return app.usageStats.firstDay ?? today
+        }
+    }
+
+    /// What every card says its numbers cover.
+    private var periodLabel: String {
+        switch chartRange {
+        case .week: return "last 7 days"
+        case .month: return "last 30 days"
+        case .all:
+            guard let first = app.usageStats.firstDay else { return "all time" }
+            return "since \(first.formatted(.dateTime.day().month(.abbreviated)))"
+        }
+    }
+
+    private var rangeDays: [DailyUsage] { app.usageStats.days(from: rangeStart) }
+
+    private var rangeTotals: (dictations: Int, words: Int, seconds: Double) {
+        rangeDays.reduce((0, 0, 0)) { ($0.0 + $1.dictations, $0.1 + $1.words, $0.2 + $1.seconds) }
     }
 
     private var avgWords: String {
-        app.entries.isEmpty ? "—" : "\(totalWords / app.entries.count)"
+        let totals = rangeTotals
+        return totals.dictations == 0 ? "—" : "\(totals.words / totals.dictations)"
     }
 
     private func compact(_ number: Int) -> String {
         number >= 1000 ? String(format: "%.1fK", Double(number) / 1000) : "\(number)"
     }
 
-    /// Days the chart spans for the current `chartRange` — a fixed 7 or 30,
-    /// or every day since the oldest entry for "All". Kept unbounded on
-    /// purpose rather than capped at some arbitrary window: a new user's
-    /// "All" is naturally short, and a long-time user's really is long —
-    /// `TrendChart` already thins its x-axis labels as point count grows,
-    /// so the line just gets denser rather than unreadable.
+    /// Days the chart spans: a fixed 7 or 30, or every day since the first
+    /// recorded one for "All" (at least a week, so a new user's chart isn't
+    /// two points). `TrendChart` thins its x-axis labels as this grows.
     private var chartDayCount: Int {
         switch chartRange {
         case .week: return 7
         case .month: return 30
         case .all:
-            guard let earliest = app.entries.map(\.date).min() else { return 7 }
             let calendar = Calendar.current
             let days = calendar.dateComponents(
-                [.day], from: calendar.startOfDay(for: earliest), to: calendar.startOfDay(for: Date())
+                [.day], from: rangeStart, to: calendar.startOfDay(for: Date())
             ).day ?? 0
             return max(days + 1, 7)
         }
-    }
-
-    /// Words and speaking pace for one calendar day — the two `chartPoints`
-    /// picks between, and `timeSavedLabel`'s own per-day building block.
-    private func dayStats(_ day: Date) -> (words: Int, wpm: Int) {
-        let calendar = Calendar.current
-        let entries = app.entries.filter { calendar.isDate($0.date, inSameDayAs: day) }
-        let words = entries.reduce(0) { $0 + $1.wordCount }
-        let seconds = entries.reduce(0.0) { $0 + ($1.duration ?? 0) }
-        let wpm = seconds > 0 ? Int(Double(words) / (seconds / 60)) : 0
-        return (words, wpm)
     }
 
     private var chartPoints: [(label: String, value: Int)] {
@@ -569,52 +600,61 @@ struct InsightsPage: View {
         let today = calendar.startOfDay(for: Date())
         return (0..<chartDayCount).reversed().map { offset in
             let day = calendar.date(byAdding: .day, value: -offset, to: today)!
-            let stats = dayStats(day)
-            let value = chartMetric == .words ? stats.words : stats.wpm
+            let usage = app.usageStats.day(day)
+            let value = chartMetric == .words
+                ? usage.words
+                : (usage.seconds > 0 ? Int(Double(usage.timedWords) / (usage.seconds / 60)) : 0)
             return (day.formatted(.dateTime.day().month(.abbreviated)), value)
         }
     }
 
+    /// Index of the first chart day Murmur has any record for. Days before
+    /// it aren't days with zero words — they're days it knows nothing
+    /// about — so the chart doesn't draw them at all.
+    private var chartKnownFrom: Int {
+        guard let first = app.usageStats.firstDay else { return 0 }
+        let calendar = Calendar.current
+        let firstPlotted = calendar.date(byAdding: .day, value: -(chartDayCount - 1), to: calendar.startOfDay(for: Date()))!
+        let gap = calendar.dateComponents([.day], from: firstPlotted, to: first).day ?? 0
+        return min(max(gap, 0), chartDayCount - 1)
+    }
+
     /// A commonly-cited average typing speed, so the gap between it and
-    /// this week's own measured dictation pace reads as time actually
-    /// saved — not just another word count restated as minutes.
+    /// the measured dictation time reads as time actually saved — not just
+    /// another word count restated as minutes.
     private static let assumedTypingWPM: Double = 40
 
-    /// This calendar week's entries — the shared basis for `timeSavedLabel`
-    /// and `topApps`, which both need "this week," not whatever `chartRange`
-    /// currently has the chart itself showing.
-    private var weekEntries: [HistoryEntry] {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        return (0..<7).flatMap { offset -> [HistoryEntry] in
-            let day = calendar.date(byAdding: .day, value: -offset, to: today)!
-            return app.entries.filter { calendar.isDate($0.date, inSameDayAs: day) }
-        }
-    }
-
-    /// Same window as `weekEntries`, over Notetaker's own notes — used
-    /// alongside it in `topApps`/`categoryUsage` so a meeting's words count
-    /// toward the same app/category totals a dictation's do, instead of
-    /// meetings being invisible to both cards.
-    private var weekMeetings: [MeetingNote] {
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: Date())
-        return (0..<7).flatMap { offset -> [MeetingNote] in
-            let day = calendar.date(byAdding: .day, value: -offset, to: today)!
-            return app.notetaker.notes.filter { calendar.isDate($0.date, inSameDayAs: day) }
-        }
-    }
-
     private var timeSavedLabel: String {
-        let words = weekEntries.reduce(0) { $0 + $1.wordCount }
-        guard words > 0 else { return "—" }
-        let dictationMinutes = weekEntries.reduce(0.0) { $0 + ($1.duration ?? 0) } / 60
-        let typingMinutes = Double(words) / Self.assumedTypingWPM
-        let savedMinutes = max(0, typingMinutes - dictationMinutes)
+        let totals = rangeTotals
+        guard totals.words > 0 else { return "—" }
+        let typingMinutes = Double(totals.words) / Self.assumedTypingWPM
+        let savedMinutes = max(0, typingMinutes - totals.seconds / 60)
         guard savedMinutes >= 1 else { return "< 1 min" }
         return savedMinutes >= 60
             ? String(format: "%.1f hrs", savedMinutes / 60)
             : "\(Int(savedMinutes.rounded())) min"
+    }
+
+    /// Notetaker's notes in the selected range — counted alongside
+    /// dictations in `topApps`/`categoryUsage` so a meeting's words count
+    /// toward the same app/category totals a dictation's do.
+    private var rangeMeetings: [MeetingNote] {
+        guard Notetaker.isAvailable else { return [] }
+        return app.notetaker.notes.filter { $0.date >= rangeStart }
+    }
+
+    /// Words per app over the selected range: dictations (from the daily
+    /// store's `appWords`) plus Notetaker notes.
+    private var rangeAppWords: [String: Int] {
+        var words: [String: Int] = [:]
+        for day in rangeDays {
+            words.merge(day.appWords ?? [:], uniquingKeysWith: +)
+        }
+        for note in rangeMeetings {
+            guard let bundleID = note.appBundleID else { continue }
+            words[bundleID, default: 0] += note.wordCount
+        }
+        return words
     }
 
     /// One row of `topAppsCard` — the app's real name and icon, resolved
@@ -641,16 +681,7 @@ struct InsightsPage: View {
     }
 
     private var topApps: [AppUsage] {
-        var wordsByBundleID: [String: Int] = [:]
-        for entry in weekEntries {
-            guard let bundleID = entry.targetBundleID else { continue }
-            wordsByBundleID[bundleID, default: 0] += entry.wordCount
-        }
-        for note in weekMeetings {
-            guard let bundleID = note.appBundleID else { continue }
-            wordsByBundleID[bundleID, default: 0] += note.wordCount
-        }
-        return wordsByBundleID
+        rangeAppWords
             .sorted { $0.value > $1.value }
             .prefix(5)
             .map { bundleID, words in
@@ -659,27 +690,44 @@ struct InsightsPage: View {
             }
     }
 
-    /// This week's words grouped by `UsageCategory`, sorted highest first.
-    /// Entries with no recorded `targetBundleID` are skipped rather than
-    /// folded into `.other` — "we don't know what app this was" and "we
-    /// know the app but not its category" are different things, and only
-    /// the second one is what `.other` is meant to mean.
+    /// The range's words grouped by `UsageCategory`, highest first.
+    /// Dictations with no recorded target app aren't in `appWords` at all
+    /// rather than folded into `.other` — "we don't know what app this
+    /// was" and "we know the app but not its category" are different
+    /// things, and only the second one is what `.other` means.
     private var categoryUsage: [(category: UsageCategory, words: Int)] {
         var totals: [UsageCategory: Int] = [:]
-        for entry in weekEntries {
-            guard let bundleID = entry.targetBundleID else { continue }
-            totals[AppCategoryClassifier.category(forBundleID: bundleID), default: 0] += entry.wordCount
-        }
-        for note in weekMeetings {
-            guard let bundleID = note.appBundleID else { continue }
-            totals[AppCategoryClassifier.category(forBundleID: bundleID), default: 0] += note.wordCount
+        for (bundleID, words) in rangeAppWords {
+            totals[AppCategoryClassifier.category(forBundleID: bundleID), default: 0] += words
         }
         return totals.sorted { $0.value > $1.value }.map { ($0.key, $0.value) }
     }
 
     // MARK: Your voice
 
+    /// Function words and spoken filler, for the single most used word. The old list stopped at the most
+    /// basic function words, so the "most used word" came out as "how" and
+    /// "like" — true, but it says nothing about the person.
     private static let wordCatalogStopWords: Set<String> = [
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
+        "of", "is", "are", "was", "were", "what", "when", "where", "who",
+        "did", "do", "does", "i", "my", "me", "this", "that", "with",
+        "about", "have", "has", "had", "you", "your", "it", "be", "been",
+        "so", "just", "can", "will", "would", "there", "here", "we", "us",
+        "how", "why", "which", "like", "also", "then", "than", "them", "they",
+        "their", "these", "those", "some", "any", "all", "from", "into", "out",
+        "not", "no", "yes", "yeah", "okay", "ok", "um", "uh", "well", "now",
+        "get", "got", "make", "made", "need", "want", "see", "look", "know",
+        "think", "should", "could", "one", "more", "very", "really", "much",
+        "its", "it's", "i'm", "don't", "doesn't", "that's", "there's", "let's",
+        "can't", "i've", "i'll", "i'd", "you're", "we're", "he", "she", "his",
+        "her", "our", "if", "as", "by", "up", "down", "again", "other", "same",
+    ]
+
+    /// Only the basic function words — for catchphrases, where a phrase
+    /// like "we need to" *is* how someone talks, even though each of its
+    /// words alone is filler.
+    private static let phraseStopWords: Set<String> = [
         "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
         "of", "is", "are", "was", "were", "what", "when", "where", "who",
         "did", "do", "does", "i", "my", "me", "this", "that", "with",
@@ -687,52 +735,67 @@ struct InsightsPage: View {
         "so", "just", "can", "will", "would", "there", "here", "we", "us",
     ]
 
+    /// Lowercased words with apostrophes kept inside them — splitting on
+    /// every non-letter turned "don't" into "don" + "t", so a catchphrase
+    /// could read "i don t". Curly apostrophes are normalised first.
     private func words(in text: String) -> [String] {
-        text.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+        text.lowercased()
+            .replacingOccurrences(of: "\u{2019}", with: "'")
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "'" })
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "'")) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// A lowercased phrase as it should read: "I", "I'm", "I've"…
+    /// capitalised, everything else as said.
+    private func displayPhrase(_ words: [String]) -> String {
+        words.map { $0 == "i" || $0.hasPrefix("i'") ? "I" + $0.dropFirst() : $0 }
+            .joined(separator: " ")
     }
 
     /// The single word (stopwords aside) said most often across all of
     /// History — a plain frequency count, no AI involved.
-    private var mostUsedWord: String? {
+    private var mostUsedWord: (word: String, count: Int)? {
         var counts: [String: Int] = [:]
         for entry in app.entries {
             for word in words(in: entry.text) where word.count > 2 && !Self.wordCatalogStopWords.contains(word) {
                 counts[word, default: 0] += 1
             }
         }
-        return counts.max(by: { $0.value < $1.value })?.key
+        return counts.max(by: { $0.value < $1.value }).map { ($0.key, $0.value) }
     }
 
     /// The recurring 3-word phrase said most often — a sliding trigram
     /// count over every entry, skipping any window that's entirely
     /// stopwords (otherwise "in the" + one more common word wins every
     /// time, which says nothing about how this person actually talks).
-    private var catchphrase: String? {
-        var counts: [String: Int] = [:]
+    private var catchphrase: (phrase: String, count: Int)? {
+        var counts: [[String]: Int] = [:]
         for entry in app.entries {
             let tokens = words(in: entry.text)
             guard tokens.count >= 3 else { continue }
             for i in 0...(tokens.count - 3) {
                 let gram = Array(tokens[i..<(i + 3)])
-                guard gram.contains(where: { !Self.wordCatalogStopWords.contains($0) }) else { continue }
-                counts[gram.joined(separator: " "), default: 0] += 1
+                guard gram.contains(where: { !Self.phraseStopWords.contains($0) }) else { continue }
+                counts[gram, default: 0] += 1
             }
         }
-        return counts.filter { $0.value > 1 }.max(by: { $0.value < $1.value })?.key
+        return counts.filter { $0.value > 1 }.max(by: { $0.value < $1.value })
+            .map { (displayPhrase($0.key), $0.value) }
     }
 
     /// The correction Murmur's Dictionary has been taught most often —
     /// `LearnedCorrection.timesSeen` already counts exactly this, so this
     /// reads that store directly rather than re-deriving anything.
-    private var mostCorrectedWord: String? {
-        LearnedStore.load().corrections.max(by: { $0.timesSeen < $1.timesSeen })?.intended
+    private var mostCorrectedWord: (word: String, times: Int)? {
+        LearnedStore.load().corrections.max(by: { $0.timesSeen < $1.timesSeen })
+            .map { ($0.intended, $0.timesSeen) }
     }
 
     /// The (weekday, hour) bucket with the most dictations, and whichever
-    /// app was most common within that bucket — a plain mode over History,
-    /// not an AI-written summary, so this stays accurate even for a small
-    /// sample instead of reading like an invented anecdote.
-    private var peakTimeDescription: String? {
+    /// app was most common within it — a plain mode over History, not an
+    /// AI-written summary, so it stays accurate even for a small sample.
+    private var peakTime: (when: String, count: Int, app: (name: String, icon: NSImage?)?)? {
         guard !app.entries.isEmpty else { return nil }
         let calendar = Calendar.current
         var buckets: [DateComponents: [HistoryEntry]] = [:]
@@ -744,50 +807,50 @@ struct InsightsPage: View {
               let weekday = comps.weekday, let hour = comps.hour
         else { return nil }
 
-        let weekdayName = calendar.weekdaySymbols[weekday - 1]
         let hour12 = hour % 12 == 0 ? 12 : hour % 12
-        let period = hour < 12 ? "am" : "pm"
-        var line = "\(weekdayName)s around \(hour12)\(period)"
-
+        let when = "\(calendar.weekdaySymbols[weekday - 1])s, \(hour12)\(hour < 12 ? "am" : "pm")"
         let appCounts = Dictionary(grouping: bucketEntries.compactMap(\.targetBundleID)) { $0 }
             .mapValues(\.count)
-        if let topBundleID = appCounts.max(by: { $0.value < $1.value })?.key {
-            line += ", usually in \(resolveApp(bundleID: topBundleID).name)"
-        }
-        return line
+        let topApp = appCounts.max(by: { $0.value < $1.value }).map { resolveApp(bundleID: $0.key) }
+        return (when, bucketEntries.count, topApp)
     }
 
-    /// Compares the last 7 days against the 7 before them.
-    private func weekOverWeek(_ metric: (Range<Int>) -> Int) -> String? {
-        let this = metric(0..<7)
-        let prior = metric(7..<14)
-        guard prior > 0, this != prior else { return nil }
+    /// The selected range against the one just before it, same length —
+    /// "vs previous 7 days" / "vs previous 30 days". None for "All"
+    /// (nothing before it), and none while the earlier period reaches back
+    /// past the first recorded day: comparing against a partly unknown
+    /// period is exactly what used to inflate these percentages.
+    private func periodOverPeriod(_ metric: (Range<Int>) -> Int) -> String? {
+        let length: Int
+        switch chartRange {
+        case .week: length = 7
+        case .month: length = 30
+        case .all: return nil
+        }
+        let calendar = Calendar.current
+        let priorStart = calendar.date(byAdding: .day, value: -(2 * length - 1), to: calendar.startOfDay(for: Date()))!
+        guard let first = app.usageStats.firstDay, first <= priorStart else { return nil }
+        let this = metric(0..<length)
+        let prior = metric(length..<(2 * length))
+        guard prior > 0, this > prior else { return nil }
         let change = Double(this - prior) / Double(prior) * 100
-        guard change > 0 else { return nil }
-        return "\(Int(change))% vs last week"
+        return "\(Int(change))% vs previous \(length) days"
     }
 
     private var wordsTrend: String? {
-        weekOverWeek { range in
-            let calendar = Calendar.current
-            let today = calendar.startOfDay(for: Date())
-            return range.reduce(0) { sum, offset in
-                let day = calendar.date(byAdding: .day, value: -offset, to: today)!
-                return sum + app.entries
-                    .filter { calendar.isDate($0.date, inSameDayAs: day) }
-                    .reduce(0) { $0 + $1.wordCount }
-            }
-        }
+        periodOverPeriod { range in dayTotals(range, \.words) }
     }
 
     private var dictationsTrend: String? {
-        weekOverWeek { range in
-            let calendar = Calendar.current
-            let today = calendar.startOfDay(for: Date())
-            return range.reduce(0) { sum, offset in
-                let day = calendar.date(byAdding: .day, value: -offset, to: today)!
-                return sum + app.entries.filter { calendar.isDate($0.date, inSameDayAs: day) }.count
-            }
+        periodOverPeriod { range in dayTotals(range, \.dictations) }
+    }
+
+    /// `keyPath` summed over the days `range` days back from today.
+    private func dayTotals(_ range: Range<Int>, _ keyPath: KeyPath<DailyUsage, Int>) -> Int {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        return range.reduce(0) { sum, offset in
+            sum + app.usageStats.day(calendar.date(byAdding: .day, value: -offset, to: today)!)[keyPath: keyPath]
         }
     }
 }
@@ -810,7 +873,7 @@ private struct UsageBarRow: View {
     let isFirst: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
+        InsightsBarRow(value: value, maxValue: maxValue, figureText: figureText, isFirst: isFirst) {
             ZStack {
                 RoundedRectangle(cornerRadius: 7).fill(Palette.warmRowBorder)
                 MurmurIconView(icon: icon)
@@ -818,38 +881,77 @@ private struct UsageBarRow: View {
                     .foregroundStyle(Palette.sunsetDeep)
             }
             .frame(width: 26, height: 26)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(name)
-                    .font(.manrope(12.5, .semibold))
-                    .foregroundStyle(Palette.warmInk)
-                    .lineLimit(1)
-                if let detail {
-                    Text(detail)
-                        .font(.manrope(10.5))
-                        .foregroundStyle(Palette.warmInkFainter)
-                }
-            }
-            .frame(width: 128, alignment: .leading)
-
-            GeometryReader { geo in
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Palette.warmRowBorder)
-                    .overlay(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Palette.sunset)
-                            .frame(width: geo.size.width * CGFloat(value) / CGFloat(max(maxValue, 1)))
+        } title: {
+            // The detail rides inline after the name while there's room
+            // and drops out when there isn't — the name itself never
+            // truncates.
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    barRowName(name)
+                    if let detail {
+                        Text(detail)
+                            .font(.manrope(10.5))
+                            .foregroundStyle(Palette.warmInkFainter)
                     }
+                }
+                barRowName(name)
             }
-            .frame(height: 6)
-
-            Text(figureText)
-                .font(.manrope(11.5))
-                .monospacedDigit()
-                .foregroundStyle(Palette.warmInkSoft)
-                .frame(width: 64, alignment: .trailing)
         }
-        .padding(.vertical, 8)
+    }
+}
+
+/// The bar every Insights card uses — thin and fully rounded so it reads
+/// as a crisp line: 3pt is exactly 6 device pixels at 2×.
+enum InsightsBar {
+    static let height: CGFloat = 3
+}
+
+/// A bar row's name — never truncated by the figure beside it.
+private func barRowName(_ name: String) -> some View {
+    Text(name)
+        .font(.manrope(12.5, .semibold))
+        .foregroundStyle(Palette.warmInk)
+        .lineLimit(1)
+}
+
+/// Shared layout for `UsageBarRow` and `AppUsageRow`: icon, then name and
+/// figure on one line with a full-width bar under them. The old version
+/// laid name, bar and figure side by side with fixed-width name/figure
+/// columns, so a long name truncated ("Dictionary correcti…") and at the
+/// narrowest window the bar got no width at all and vanished.
+private struct InsightsBarRow<Icon: View, Title: View>: View {
+    let value: Int
+    let maxValue: Int
+    let figureText: String
+    let isFirst: Bool
+    @ViewBuilder var icon: Icon
+    @ViewBuilder var title: Title
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            icon
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    title.frame(maxWidth: .infinity, alignment: .leading)
+                    Text(figureText)
+                        .font(.manrope(11.5, .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(Palette.warmInkSoft)
+                        .fixedSize()
+                }
+                GeometryReader { geo in
+                    Capsule()
+                        .fill(Palette.warmRowBorder)
+                        .overlay(alignment: .leading) {
+                            Capsule()
+                                .fill(Palette.sunset)
+                                .frame(width: geo.size.width * CGFloat(value) / CGFloat(max(maxValue, 1)))
+                        }
+                }
+                .frame(height: InsightsBar.height)
+            }
+        }
+        .padding(.vertical, 10)
         .overlay(alignment: .top) {
             if !isFirst { Rectangle().fill(Palette.warmRowBorder).frame(height: 1) }
         }
@@ -862,7 +964,8 @@ private struct AppUsageRow: View {
     let isFirst: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
+        InsightsBarRow(value: usage.words, maxValue: maxWords, figureText: usage.words.formatted(),
+                       isFirst: isFirst) {
             Group {
                 if let icon = usage.icon {
                     Image(nsImage: icon).resizable()
@@ -872,115 +975,79 @@ private struct AppUsageRow: View {
             }
             .frame(width: 26, height: 26)
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-
-            Text(usage.name)
-                .font(.manrope(12.5, .semibold))
-                .foregroundStyle(Palette.warmInk)
-                .lineLimit(1)
-                .frame(width: 120, alignment: .leading)
-
-            GeometryReader { geo in
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Palette.warmRowBorder)
-                    .overlay(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Palette.sunset)
-                            .frame(width: geo.size.width * CGFloat(usage.words) / CGFloat(max(maxWords, 1)))
-                    }
-            }
-            .frame(height: 6)
-
-            Text("\(usage.words)")
-                .font(.manrope(11.5))
-                .monospacedDigit()
-                .foregroundStyle(Palette.warmInkSoft)
-                .frame(width: 56, alignment: .trailing)
-        }
-        .padding(.vertical, 8)
-        .overlay(alignment: .top) {
-            if !isFirst {
-                Rectangle().fill(Palette.warmRowBorder).frame(height: 1)
-            }
+        } title: {
+            barRowName(usage.name)
         }
     }
 }
 
-/// A borderless pill-in-pill segmented control — the same recipe as
-/// StyleView's own tone switcher (`Palette.sunset`-filled capsule, no
-/// dividers between segments), generalized to any `Hashable` option since
-/// this page needs two of these (metric, range) rather than one fixed
-/// enum. The shared `SegmentedPicker` (DesignSystem.swift) exists too, but
-/// draws with the dynamic light/dark `Palette` — StyleView already skips
-/// it for the same reason this does: it reads as a mismatched, cooler
-/// neutral against this page's warm/light-only palette.
-private struct WarmSegmentedPicker<T: Hashable>: View {
+/// A native-style segmented control: a quiet neutral track, a white thumb
+/// under the selected option that slides between options, ink text. The
+/// sunset fill it used to have made the period switch the loudest thing on
+/// the page — louder than the numbers it scopes — and matched the chart's
+/// own line; the accent is for data, not chrome. No shadow on the thumb
+/// (a hairline edge instead), per the app's no-shadow rule for anything on
+/// the glass panel. Generic over any `Hashable` option: this page has two
+/// (range, metric). Not the shared `SegmentedPicker` (DesignSystem.swift),
+/// which draws with the cooler dynamic light/dark `Palette`.
+struct WarmSegmentedPicker<T: Hashable>: View {
     let options: [T]
     let label: (T) -> String
     @Binding var selection: T
 
+    @Namespace private var thumb
+
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 0) {
             ForEach(options, id: \.self) { option in
+                let selected = option == selection
                 Button {
-                    selection = option
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) { selection = option }
                 } label: {
                     Text(label(option))
-                        .font(.manrope(11.5, option == selection ? .semibold : .regular))
-                        .foregroundStyle(option == selection ? .white : Palette.warmInkSoft)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 5)
+                        .font(.manrope(11.5, selected ? .semibold : .medium))
+                        .foregroundStyle(selected ? Palette.warmInk : Palette.warmInkSoft)
+                        .padding(.horizontal, 10)
+                        .frame(height: 22)
                         .background {
-                            if option == selection {
-                                Capsule().fill(Palette.sunset)
+                            if selected {
+                                Capsule()
+                                    .fill(Palette.panel)
+                                    .overlay(Capsule().strokeBorder(Palette.glassDivider, lineWidth: 0.5))
+                                    .matchedGeometryEffect(id: "thumb", in: thumb)
                             }
                         }
+                        .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(3)
-        .background(Color.white, in: Capsule())
-        .overlay(Capsule().stroke(Palette.warmRowBorder, lineWidth: 1))
+        .padding(2)
+        .background(Palette.hoverWash, in: Capsule())
         .fixedSize()
     }
 }
 
-// MARK: - Trend chart
 
-/// Reports the hover tooltip's own rendered size back up so its position
-/// can be derived from its *actual* height instead of a guessed constant.
-private struct TooltipSizeKey: PreferenceKey {
-    static var defaultValue: CGSize = .zero
-    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
-        value = nextValue()
-    }
-}
+// MARK: - Trend chart
 
 struct TrendChart: View {
     let points: [(label: String, value: Int)]
+    /// Points before this index are days with no record at all (before
+    /// Murmur started keeping one) — the x-axis still spans them, but the
+    /// line starts here instead of claiming zero words for them.
+    var knownFrom: Int = 0
     @Binding var hoverIndex: Int?
-
-    /// The hover tooltip's own measured size (see `SizeKey` below) — its
-    /// position is derived from this rather than a guessed fixed offset,
-    /// so the gap above the curve is exact regardless of font metrics.
-    @State private var tooltipSize: CGSize = .zero
-
-    /// Fixed clearance between the tooltip's bottom edge and the point it
-    /// describes. Previously the tooltip was centered a flat 34pt above
-    /// the point with no regard for its own height, which happened to
-    /// leave a reasonable gap only by coincidence for a short tooltip —
-    /// against Manrope's actual line height here, the box's bottom edge
-    /// landed right on the curve instead, worst right at a peak (the one
-    /// case that most needs clearance). Positioning off the tooltip's own
-    /// measured height fixes this everywhere, not just at the extremes.
-    private static let tooltipGap: CGFloat = 10
 
     /// The plot and the y-axis labels must be laid out at exactly the same
     /// height or the ticks stop lining up with their gridlines. A seven-
     /// point weekly trend doesn't get more readable past roughly this
     /// height — it just leaves the line stranded in empty space — so the
-    /// chart is deliberately sized, not stretched to fill the window.
-    private let plotHeight: CGFloat = 240
+    /// chart is deliberately sized, not stretched to fill the window. 200,
+    /// not 240: with the readout above it, 240 let the chart card fill the
+    /// default window's whole first screen and cut the cards below off at
+    /// their titles.
+    private let plotHeight: CGFloat = 200
 
     /// Every Nth x-axis label is shown once a range has more days than fit
     /// legibly — a week's worth never thins, a month shows roughly one
@@ -1039,6 +1106,7 @@ struct TrendChart: View {
                     let w = geo.size.width
                     let h = geo.size.height
                     let coords = coordinates(in: CGSize(width: w, height: h))
+                    let known = Array(coords[min(knownFrom, coords.count - 1)...])
 
                     ZStack(alignment: .topLeading) {
                         // Recessive gridlines
@@ -1052,11 +1120,11 @@ struct TrendChart: View {
                         }
 
                         // Area wash — ~10% opacity, never a saturated block
-                        smoothPath(coords, closedTo: h)
+                        smoothPath(known, closedTo: h)
                             .fill(Palette.sunset.opacity(0.1))
 
                         // 2.5px line
-                        smoothPath(coords, closedTo: nil)
+                        smoothPath(known, closedTo: nil)
                             .stroke(Palette.sunset,
                                     style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
 
@@ -1070,87 +1138,27 @@ struct TrendChart: View {
                             Circle()
                                 .fill(Palette.sunset)
                                 .frame(width: 8, height: 8)
+                                .overlay(Circle().stroke(.white, lineWidth: 2))
                                 .position(coords[i])
                         }
 
-                        // Direct end-label on the most recent point
-                        if let last = coords.last, let value = points.last?.value {
+                        // Today's point. Its value lives in the card header
+                        // (`InsightsPage.chartReadout`), never on the plot.
+                        if let last = coords.last {
                             Circle()
                                 .fill(Palette.sunset)
                                 .frame(width: 8, height: 8)
                                 .overlay(Circle().stroke(.white, lineWidth: 2))
                                 .position(last)
-                            // `.line-chart-end-label`:
-                            // `transform: translate(-50%, calc(-100% - 8px))`
-                            // — centered on the dot, lifted clear above it.
-                            //
-                            // Clamping this horizontally (an earlier fix)
-                            // was the actual bug: shifting the label left,
-                            // toward the plot's interior, moves it onto a
-                            // stretch of curve that's still descending —
-                            // i.e. *higher* than the dot — so the line
-                            // ended up passing through the label instead of
-                            // under it. The design never clamps: the card
-                            // carries its own ~20pt padding around the
-                            // plot, the chart card doesn't clip its
-                            // content, so a few points of horizontal
-                            // overflow from a right-edge label lands
-                            // harmlessly in that padding instead of
-                            // overlapping the curve.
-                            Text("\(value)")
-                                .font(.manrope(12, .semibold))
-                                .monospacedDigit()
-                                .foregroundStyle(Palette.sunset)
-                                .fixedSize()
-                                .position(x: last.x, y: max(last.y - 17, 9))
                         }
 
-                        // Hover tooltip
-                        if let i = hoverIndex, coords.indices.contains(i) {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("\(points[i].value)")
-                                    .font(.manrope(12, .semibold))
-                                    .foregroundStyle(Palette.warmInk)
-                                Text(points[i].label)
-                                    .font(.manrope(10))
-                                    .foregroundStyle(Palette.warmInkSoft)
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .background(Color.white, in: RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Palette.warmDivider, lineWidth: 1))
-                            .background(
-                                GeometryReader { tooltipGeo in
-                                    Color.clear
-                                        .preference(key: TooltipSizeKey.self, value: tooltipGeo.size)
-                                })
-                            // Bottom edge sits `tooltipGap` above the point,
-                            // full stop — never clamped back down toward it
-                            // (the previous bug: flooring this pulled the
-                            // tooltip down toward a high peak once the old
-                            // fixed offset went negative, landing it right
-                            // on the curve instead of above it, worst
-                            // exactly where clearance mattered most) and
-                            // never guessed from font metrics (the other
-                            // bug: a flat 34pt offset assumed a tooltip
-                            // height that didn't match Manrope's real line
-                            // height, so even the "un-clamped" version still
-                            // touched the curve at every point, not just
-                            // peaks). Floating above the plot's own top
-                            // edge is fine — the chart card's padding
-                            // absorbs it, same as the end-label's horizontal
-                            // overflow above.
-                            .position(x: min(max(coords[i].x, 40), w - 40),
-                                      y: coords[i].y - Self.tooltipGap - tooltipSize.height / 2)
-                            .onPreferenceChange(TooltipSizeKey.self) { tooltipSize = $0 }
-                        }
                     }
                     .contentShape(Rectangle())
                     .onContinuousHover { phase in
                         switch phase {
                         case .active(let location):
                             let step = w / CGFloat(max(points.count - 1, 1))
-                            hoverIndex = min(max(Int((location.x / step).rounded()), 0), points.count - 1)
+                            hoverIndex = min(max(Int((location.x / step).rounded()), knownFrom), points.count - 1)
                         case .ended:
                             hoverIndex = nil
                         }
