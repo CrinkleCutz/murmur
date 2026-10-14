@@ -21,7 +21,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     // Observable state for the dashboard window.
-    @Published var uiState: UIState = .idle { didSet { updateIcon(); updateHUD(); updateEscapeInterceptor() } }
+    @Published var uiState: UIState = .idle { didSet {
+        updateIcon(); updateHUD(); updateEscapeInterceptor()
+        if uiState == .idle, !pendingCorrectionNotices.isEmpty {
+            let waiting = pendingCorrectionNotices
+            pendingCorrectionNotices = []
+            // After the check mark has had its moment.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                guard let self, self.uiState == .idle else { return }
+                self.correctionToast.show(waiting)
+            }
+        } else if uiState != .idle {
+            pendingCorrectionNotices += correctionToast.interrupt()
+        }
+        // Other sound down while the microphone is open, back the moment it closes — see `AudioDuck`.
+        if uiState == .recording, oldValue != .recording {
+            AudioDuck.shared.begin()
+        } else if oldValue == .recording, uiState != .recording {
+            AudioDuck.shared.end()
+        }
+    } }
     @Published var isHandsFree = false { didSet { updateHUD() } }
     @Published var entries: [HistoryEntry] = []
     @Published var micAuthorized = false
@@ -31,6 +50,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// Settings ▸ Dictation ▸ Translate into — a language code, or nil when off. See `TranslateInto`.
     @Published var translateInto: String? = TranslateInto.target
     @Published var lastError: String?
+    /// Onboarding's "bring your words over" row: the Dictionary opens with its import sheet.
+    @Published var pendingDictionaryImport = false
+    /// What was learned while a dictation was in progress — shown on the card once it is idle again.
+    private var pendingCorrectionNotices: [LearnedNotice] = []
+    private let correctionToast = CorrectionToastController()
+    private let pasteLastShortcut = PasteLastShortcut()
+    /// A Bluetooth headset is still switching into call mode: the start sound waits until it can hear you.
+    private var startSoundWaitsForHeadset = false
     /// One line while macOS secure input has been on long enough to matter (see `SecureInputMonitor`); nil otherwise.
     @Published var secureInputNotice: String?
     private var secureInputObserver: AnyCancellable?
@@ -221,6 +248,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         escapeInterceptor.onEscape = { [weak self] in self?.cancelDictation() }
     }
 
+    /// ⌃⌥V: the newest dictation in History, pasted at the cursor again. Not while one is in progress.
+    private func pasteLastDictation() {
+        guard uiState == .idle, let text = history.entries.first?.text, !text.isEmpty else { return }
+        Task { @MainActor in
+            // The chord's own ⌃ and ⌥ are still down; a paste sent now would arrive as ⌃⌥⌘V.
+            await TextInserter.waitForModifierRelease()
+            TextInserter.insert(text)
+        }
+    }
+
     /// Hands-free's Stop button: the same as tapping the dictation key again.
     private func finishHandsFree() {
         guard uiState == .recording else { return }
@@ -275,7 +312,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         NameFixLog.isRecording = true
         // ⌘X ⌘C ⌘V ⌘A ⌘Z in Murmur's own fields — see `OwnTextField.editMenu`.
         if NSApp.mainMenu == nil { NSApp.mainMenu = OwnTextField.editMenu() }
-        // A name corrected by hand right after a dictation is learned — say so, where it can be undone.
+        // A name corrected by hand right after a dictation is learned — say what, where it can be undone.
+        correctionToast.onUndo = { receipts in
+            receipts.forEach(LearnedStore.undo)
+            NotificationLog.add(
+                title: "Took back \(receipts.count == 1 ? "a correction" : "\(receipts.count) corrections")",
+                message: "Murmur won’t use \(receipts.count == 1 ? "it" : "them"). Corrections you keep are in Voice Profile.",
+                kind: .learnedFromEdit)
+        }
         EditLearner.onLearned = { [weak self] learned in
             guard let self, let first = learned.first else { return }
             let names = learned.map { "“\($0.intended)”" }.joined(separator: ", ")
@@ -284,10 +328,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 message: "You corrected “\(first.heard)” to “\(first.intended)”, so Murmur writes it that way from now "
                     + "on. Wrong? Remove it in Voice Profile.",
                 kind: .learnedFromEdit)
+            // The card is for the moment, while the edit is fresh; one still on its way waits for the dictation in
+            // progress to land rather than sit over its pill.
             if self.uiState == .idle {
-                self.flashHUD(.info("Learned \(names)", symbol: "text.badge.checkmark"), for: 2.4)
+                self.correctionToast.show(learned)
+            } else {
+                self.pendingCorrectionNotices += learned
             }
         }
+        // A dictation that never ended (Murmur quit mid-way) may have left other sound turned down.
+        AudioDuck.shared.restoreAfterCrash()
+        // A Bluetooth headset takes seconds to switch into call mode; the start sound says when it can hear you.
+        recorder.onFirstAudio = { [weak self] in
+            guard let self, self.startSoundWaitsForHeadset else { return }
+            self.startSoundWaitsForHeadset = false
+            if self.uiState == .recording { SoundEffect.play("Pop") }
+        }
+        // ⌃⌥V pastes the last dictation again, wherever the cursor is.
+        pasteLastShortcut.onTrigger = { [weak self] in self?.pasteLastDictation() }
+        pasteLastShortcut.start()
         // And each dictation's microphone start-up, which decides whether a warm microphone is ever worth it.
         recorder.recordsStartup = true
         FontLoader.registerManrope()
@@ -947,11 +1006,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     func correctHistoryEntry(id: String, newText: String) -> Int {
         guard let entry = history.entries.first(where: { $0.id == id }),
               entry.text != newText else { return 0 }
-        let learnedCount = LearnedStore.learn(original: entry.text, corrected: newText)
+        let learned = LearnedStore.learnTracked(original: entry.text, corrected: newText)
         history.update(id: id, text: newText)
         entries = history.entries
         rebuildMenu()
-        return learnedCount
+        // The same "Saved … Undo" card as a correction made where the dictation landed.
+        if !learned.isEmpty, uiState == .idle { correctionToast.show(learned) }
+        return learned.count
     }
 
     /// What dictation hears in a Voice Training recording: the user's own engine and vocabulary, with the word being
@@ -1266,6 +1327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
         // Whatever the last dictation's field shows now is what the user made of it — see `EditLearner`.
         EditLearner.dictationStarted()
+        SentMessageLearner.dictationStarted()
         do {
             try recorder.start()
             recordingStartedAt = Date()
@@ -1306,7 +1368,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             hudFlashTask?.cancel()
             hudFlash = nil
             lastError = nil
-            SoundEffect.play("Pop")
+            if recorder.inputIsBluetooth, !recorder.hasDeliveredAudio {
+                startSoundWaitsForHeadset = true
+                dictationLog.notice("mic: waiting for the Bluetooth headset before the start sound")
+            } else {
+                startSoundWaitsForHeadset = false
+                SoundEffect.play("Pop")
+            }
         } catch {
             lastError = "Could not start recording: \(error.localizedDescription)"
             SoundEffect.play("Basso")
@@ -2074,8 +2142,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                                 : formatted
                             // Where it lands, so a name the user corrects by hand afterwards is learned — see `EditLearner`.
                             let editTarget = EditLearner.watchBeforePaste()
+                            // What the recognizer wrote and what is pasted, for the local record of edits.
+                            let editDraft = EditRecordStore.isEnabled ? EditRecordDraft(
+                                raw: raw, pasted: inserted, app: resolvedBundleID ?? "",
+                                engine: AppProfileStore.engine(forBundleID: resolvedBundleID),
+                                model: AppProfileStore.model(forBundleID: resolvedBundleID)) : nil
                             TextInserter.insert(inserted) { [weak self] outcome in
-                                if outcome == .consumed, let editTarget { EditLearner.track(editTarget, inserted: inserted) }
+                                // Either way of pasting: `.unconfirmed` only means nobody saw the app read the text, and
+                                // the watcher looks for the dictation in the field itself before it learns anything.
+                                if outcome == .consumed || outcome == .unconfirmed, let editTarget {
+                                    EditLearner.track(editTarget, inserted: inserted, draft: editDraft)
+                                }
+                                // A field Murmur can't read (Codex's composer): what was sent is looked up afterwards in
+                                // the agent's own session file — see `SentMessageLearner`.
+                                if outcome == .consumed || outcome == .unconfirmed {
+                                    SentMessageLearner.expect(
+                                        inserted: inserted, bundleID: resolvedBundleID, fieldWasReadable: editTarget != nil,
+                                        draft: editDraft)
+                                }
                                 // Nothing read the text: the paste didn't happen. Say so rather than let it vanish.
                                 guard outcome == .notObserved, let self else { return }
                                 self.lastError = "The app in front never took the text, so it wasn't pasted. It's in "

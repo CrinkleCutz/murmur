@@ -751,8 +751,15 @@ struct OnboardingRoot: View {
             MenuBarPicture(reduceMotion: reduceMotion)
                 .padding(.bottom, 16)
             OnboardingCard {
-                CardRow(title: "Teach it your words", detail: "Names and terms it should always get right.",
-                        action: { finish(opening: .dictionary) }) {
+                // Another voice app on this Mac: its words are one paste away.
+                let previous = DictionaryImport.installedSources().first
+                CardRow(title: "Teach it your words",
+                        detail: previous.map { "Coming from \($0)? Bring its words over." }
+                            ?? "Names and terms it should always get right.",
+                        action: {
+                            app.pendingDictionaryImport = previous != nil
+                            finish(opening: .dictionary)
+                        }) {
                     RowDestinationLabel(title: "Dictionary")
                 }
                 CardRow(title: "Choose how it sounds", detail: "As spoken, casual, formal — per app if you like.",

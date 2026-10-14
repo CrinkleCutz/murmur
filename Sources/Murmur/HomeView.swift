@@ -17,6 +17,8 @@ struct HomePage: View {
     @State private var searchOpen = false
     @State private var showClearConfirm = false
     @State private var editingEntry: HistoryEntry?
+    /// The dictation a problem is being reported about (History row ▸ More ▸ Report a problem).
+    @State private var reportingEntry: HistoryEntry?
     @State private var editText = ""
     @State private var learnFeedback: String?
     // Shared so opening a second row's overflow menu can't leave two open
@@ -39,6 +41,10 @@ struct HomePage: View {
             }
         }
         .sheet(item: $editingEntry) { entry in correctionSheet(entry) }
+        .sheet(item: $reportingEntry) { entry in
+            SupportReportSheet(onDone: { reportingEntry = nil },
+                               dictation: SupportReport.DictationContext.make(pasted: entry.text))
+        }
         // Rendered here — above `historySection`'s own `ScrollView`, not
         // nested inside it — so the menu is never a `LazyVStack` sibling
         // of the rows below it. A same-row `.overlay` plus `.zIndex` (tried
@@ -60,7 +66,7 @@ struct HomePage: View {
                     // flipped upward when there isn't 84pt of headroom
                     // below, and kept clear of the left/right edges.
                     let menuWidth: CGFloat = 190
-                    let menuHeight: CGFloat = 84
+                    let menuHeight: CGFloat = 122
                     let opensUpward = rect.maxY + 6 + menuHeight > proxy.size.height
                     let x = max(0, min(rect.maxX - menuWidth, proxy.size.width - menuWidth))
                     let y = opensUpward ? rect.minY - 6 - menuHeight : rect.maxY + 6
@@ -77,6 +83,10 @@ struct HomePage: View {
                             openMenuEntryID = nil
                             app.pendingTemplateText = entry.text
                             page = .templates
+                        },
+                        onReport: {
+                            openMenuEntryID = nil
+                            reportingEntry = entry
                         },
                         onDelete: {
                             openMenuEntryID = nil
@@ -692,12 +702,14 @@ private struct RowMenuAnchorKey: PreferenceKey {
 /// A later action just becomes another `MenuRow` above the divider.
 private struct RowActionsMenu: View {
     let onTemplate: () -> Void
+    let onReport: () -> Void
     let onDelete: () -> Void
     let onDismiss: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             MenuRow(icon: .tpl, label: "Turn into a note", action: onTemplate)
+            MenuRow(icon: .help, label: "Report a problem", action: onReport)
             Rectangle().fill(Palette.warmRowBorder).frame(height: 1).padding(.vertical, 5)
             MenuRow(icon: .trash, label: "Delete", tint: Palette.danger, action: onDelete)
         }
@@ -748,6 +760,11 @@ private struct MenuRow: View {
 /// to 1 on the tallest.
 struct HeroCaptureWaveform: View {
     var active: Bool = true
+    /// The loop only runs while Murmur is the app in front. Left running behind other apps it kept the main thread
+    /// about half busy and the app at 25–30% of a core while idle (sampled 2026-10-10) — at exactly the moment a
+    /// dictation into another app needs the processor and the graphics chip.
+    @Environment(\.controlActiveState) private var windowState
+    private var running: Bool { active && windowState != .inactive }
     /// Sunset on Home's ink card (passed in); the accent on a white card
     /// (the voice profile), where white bars would vanish.
     var color: Color = .white
@@ -787,8 +804,8 @@ struct HeroCaptureWaveform: View {
             }
         }
         .frame(height: 108)
-        .onAppear { tall = active }
-        .onChange(of: active) { _, isActive in tall = isActive }
+        .onAppear { tall = running }
+        .onChange(of: running) { _, isRunning in tall = isRunning }
     }
 }
 

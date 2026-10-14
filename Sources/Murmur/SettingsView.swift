@@ -49,6 +49,15 @@ struct SettingsPage: View {
     @State private var handsFreeAutoStop = Settings.handsFreeAutoStop
     @State private var autoPasteEnabled = Settings.autoPasteEnabled
     @State private var playSounds = Settings.playSounds
+    /// Learning ▸ the three switches (`EditLearner`, `EditRecordStore`, `PasteLastShortcut`) and the record's size.
+    @AppStorage("learnFromEdits") private var learnFromEdits = true
+    @AppStorage("keepEditRecords") private var keepEditRecords = false
+    @AppStorage("pasteLastShortcut") private var pasteLastShortcut = true
+    @AppStorage("duckOtherAudio") private var duckOtherAudio = true
+    @AppStorage("useBluetoothMicrophone") private var useBluetoothMicrophone = false
+    @State private var editRecordCount = 0
+    /// The Mac's input is a Bluetooth device, which Murmur prefers not to record from.
+    @State private var inputIsBluetooth = false
     /// Which `AccentFieldSelect` (by its `id`) has its panel open, if any.
     /// Lifted up to the whole page rather than owned by each dropdown —
     /// see the panel-rendering `.overlayPreferenceValue` below for why.
@@ -337,6 +346,20 @@ struct SettingsPage: View {
                         }
                 }
                 SettingsFieldRow(
+                    label: "Turn other sound down while you dictate",
+                    detail: "Quieter in headphones, silent on speakers, back when you finish."
+                ) {
+                    WarmToggle(isOn: $duckOtherAudio)
+                }
+                SettingsFieldRow(
+                    label: "Use your AirPods’ microphone",
+                    detail: inputIsBluetooth || useBluetoothMicrophone
+                        ? "Slower to start and less accurate than your Mac’s own microphone."
+                        : "For AirPods or another Bluetooth headset, when one is connected."
+                ) {
+                    WarmToggle(isOn: $useBluetoothMicrophone)
+                }
+                SettingsFieldRow(
                     label: "Paste automatically",
                     detail: "Off leaves each dictation on the clipboard for you to paste. Apps can differ — set "
                         + "that in App Profiles."
@@ -399,6 +422,59 @@ struct SettingsPage: View {
                     }
                 }
             }
+
+            SettingsSectionLabel(title: "LEARNING", trailing: "Stays on this Mac")
+                .padding(.top, 24)
+            SettingsCard {
+                SettingsFieldRow(
+                    label: "Learn from your corrections",
+                    detail: "Fix a name where it lands and Murmur writes it your way."
+                ) {
+                    WarmToggle(isOn: $learnFromEdits)
+                }
+                SettingsFieldRow(
+                    label: "Keep a private record of your edits",
+                    detail: "Shows which words need fixing most. Nothing is sent.",
+                    isLast: editRecordCount == 0 && !keepEditRecords
+                ) {
+                    WarmToggle(isOn: $keepEditRecords)
+                }
+                if editRecordCount > 0 || keepEditRecords {
+                    SettingsFieldRow(
+                        label: "The record",
+                        detail: "\(editRecordCount) dictation\(editRecordCount == 1 ? "" : "s") kept.",
+                        isLast: true
+                    ) {
+                        HStack(spacing: 8) {
+                            Button("Show") {
+                                NSWorkspace.shared.activateFileViewerSelecting([EditRecordStore.fileURL])
+                            }
+                            .buttonStyle(WarmGhostButtonStyle())
+                            .disabled(editRecordCount == 0)
+                            Button("Delete") {
+                                EditRecordStore.clear()
+                                editRecordCount = 0
+                            }
+                            .buttonStyle(WarmGhostButtonStyle())
+                            .disabled(editRecordCount == 0)
+                        }
+                    }
+                }
+            }
+            SettingsCard {
+                SettingsFieldRow(
+                    label: "Paste last dictation",
+                    detail: "Press ⌃⌥V in any app to paste your last dictation again.",
+                    isLast: true
+                ) {
+                    WarmToggle(isOn: $pasteLastShortcut)
+                }
+            }
+            .padding(.top, 12)
+        }
+        .onAppear {
+            editRecordCount = EditRecordStore.load().count
+            inputIsBluetooth = AudioRecorder.systemDefaultInputIsBluetooth()
         }
     }
 

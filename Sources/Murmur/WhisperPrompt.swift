@@ -71,6 +71,24 @@ enum WhisperPrompt {
         }
     }
 
+    /// A name or an unusual word, by its spelling alone: a word the dictionary doesn't know ("Planrify", "Jānis"), or
+    /// letters joined with a digit or a mark ("UI/UX", "whisper.cpp"). Stricter than `isWorthMentioning`, which takes
+    /// any capital for a name: "Correction" and "10:30" are neither.
+    ///
+    /// For what Murmur learned by itself from the user's edits. Those corrections often end in everyday words ("the
+    /// army is still" → "are we", "of Dutch for" → "to see"); the correction still does its work after recognition,
+    /// but the words have no place in the sentence Whisper is told first — everyday words there pull themselves into
+    /// the text (measured 2026-09-28), and eight such phrases had filled a quarter of it (2026-10-11). What the user
+    /// taught on purpose is not held to this.
+    static func isUnusual(_ term: String, isKnownWord: (String) -> Bool = HarperChecker.isKnownEnglishWord) -> Bool {
+        term.split(whereSeparator: \.isWhitespace).contains { word in
+            let letters = word.filter(\.isLetter).lowercased()
+            guard !letters.isEmpty else { return false }
+            if word.contains(where: { $0.isNumber || "/.+#_".contains($0) }) { return true }
+            return !isKnownWord(letters)
+        }
+    }
+
     // MARK: - Segments to keep
 
     /// Whisper works in 30-second windows. When a dictation runs a little past 30 seconds, the last window is almost
@@ -96,6 +114,10 @@ enum WhisperPrompt {
         }
         let common: Set<String> = ["app", "they", "latest", "updates", "from", "chat", "are", "we", "white", "murmur"]
         let known: (String) -> Bool = { common.contains($0) }
+
+        check(["Planrify", "Jānis", "UI/UX", "whisper.cpp", "Gemma 4", "RevenueCat"].allSatisfy { isUnusual($0, isKnownWord: known) }
+              && !["are we", "latest updates", "Murmur", "10:30", "From Chat"].contains { isUnusual($0, isKnownWord: known) },
+              "a name or an unusual word is told from an everyday phrase by its spelling, not its capital")
 
         let text = self.text(for: ["Claude", "npm", "Murmur.", "app", "from Chat", "latest updates", "Wispr Flow",
                                    "10:30", "iOS", "whisper.cpp", "they", "Wispr flow"],

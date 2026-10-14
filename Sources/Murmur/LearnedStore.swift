@@ -9,6 +9,16 @@ struct LearnedCorrection: Codable, Identifiable, Equatable {
     var timesSeen: Int = 1
 }
 
+/// What one `LearnedStore.addTracked` changed, so exactly that — and nothing the user had before — can be taken back.
+struct LearnReceipt: Equatable {
+    /// The mapping that was added or seen again.
+    let correctionID: UUID
+    /// New with this edit (taking it back removes it) rather than an old one seen once more (one less seen).
+    let createdCorrection: Bool
+    /// The spelling went into the user's words with this edit; nil when it was already there.
+    let termAdded: String?
+}
+
 struct LearnedData: Codable {
     var corrections: [LearnedCorrection] = []
     /// Words/phrases the user has taught (used for recognition biasing
@@ -63,29 +73,78 @@ enum LearnedStore {
     /// as a mapping they'd rewrite normal speech ("ready for action"), so nothing at all is learned from them.
     @discardableResult
     static func add(heard: String, intended: String) -> Bool {
+        addTracked(heard: heard, intended: intended) != nil
+    }
+
+    /// `add`, saying what it changed (nil when no mapping was kept) — for the "Saved … Undo" card, which takes back
+    /// exactly this with `undo`.
+    @discardableResult
+    static func addTracked(heard: String, intended: String) -> LearnReceipt? {
         let heardTrimmed = normalizePhrase(heard)
         let intendedTrimmed = cleanedTerm(intended)
-        if isRewording(heard: heardTrimmed, intended: intendedTrimmed) { return false }
+        if isRewording(heard: heardTrimmed, intended: intendedTrimmed) { return nil }
         guard isUsefulMapping(heard: heardTrimmed, intended: intendedTrimmed) else {
-            addTerm(intendedTrimmed)
-            return false
+            // Nothing to swap, but a name the user wrote is worth knowing — a name, not any word (`isUnusual`).
+            if WhisperPrompt.isUnusual(intendedTrimmed) { addTerm(intendedTrimmed) }
+            return nil
         }
         var learned = load()
+        let receipt = record(heard: heardTrimmed, intended: intendedTrimmed, in: &learned)
+        save(learned)
+        return receipt
+    }
+
+    /// The mapping and its spelling, entered into `learned` (pure — the part `addTracked` and its self-test share).
+    static func record(heard: String, intended: String, in learned: inout LearnedData) -> LearnReceipt {
+        let correctionID: UUID
+        let created: Bool
         if let index = learned.corrections.firstIndex(where: {
-            $0.heard.lowercased() == heardTrimmed.lowercased()
-                && $0.intended == intendedTrimmed
+            $0.heard.lowercased() == heard.lowercased() && $0.intended == intended
         }) {
             learned.corrections[index].timesSeen += 1
+            correctionID = learned.corrections[index].id
+            created = false
         } else {
-            learned.corrections.append(LearnedCorrection(
-                heard: heardTrimmed, intended: intendedTrimmed))
+            let new = LearnedCorrection(heard: heard, intended: intended)
+            learned.corrections.append(new)
+            correctionID = new.id
+            created = true
         }
         if learned.corrections.count > 300 {
             learned.corrections.removeFirst(learned.corrections.count - 300)
         }
-        appendTerm(intendedTrimmed, to: &learned)
+        // The new spelling joins the user's words only when it is a name or an unusual word. A correction that ends in
+        // everyday words ("the army is still" → "are we") still corrects; it just isn't something to tell the engine.
+        var termAdded: String?
+        if WhisperPrompt.isUnusual(intended) {
+            let known = learned.terms.contains { $0.lowercased() == intended.lowercased() }
+            appendTerm(intended, to: &learned)
+            if !known { termAdded = intended }
+        }
+        return LearnReceipt(correctionID: correctionID, createdCorrection: created, termAdded: termAdded)
+    }
+
+    /// Takes back what `addTracked` did: a mapping that came with that edit goes, one that was already known is seen
+    /// once less, and the spelling leaves the user's words only if that edit put it there and no other correction
+    /// still ends in it.
+    static func undo(_ receipt: LearnReceipt) {
+        var learned = load()
+        take(back: receipt, from: &learned)
         save(learned)
-        return true
+    }
+
+    static func take(back receipt: LearnReceipt, from learned: inout LearnedData) {
+        if let index = learned.corrections.firstIndex(where: { $0.id == receipt.correctionID }) {
+            if receipt.createdCorrection {
+                learned.corrections.remove(at: index)
+            } else {
+                learned.corrections[index].timesSeen = max(1, learned.corrections[index].timesSeen - 1)
+            }
+        }
+        if let term = receipt.termAdded?.lowercased(),
+           !learned.corrections.contains(where: { cleanedTerm($0.intended).lowercased() == term }) {
+            learned.terms.removeAll { cleanedTerm($0).lowercased() == term }
+        }
     }
 
     /// Every word on both sides is an ordinary English word — a rewording, not a misheard name. A side with a number
@@ -119,6 +178,14 @@ enum LearnedStore {
         learned.terms.append(term)
         if learned.terms.count > 300 {
             learned.terms.removeFirst(learned.terms.count - 300)
+        }
+    }
+
+    /// `learn`, with what each correction changed — so the "Saved … Undo" card can take it back.
+    static func learnTracked(original: String, corrected: String) -> [LearnedNotice] {
+        extractCorrections(original: original, corrected: corrected).compactMap { pair in
+            addTracked(heard: pair.heard, intended: pair.intended)
+                .map { LearnedNotice(heard: pair.heard, intended: pair.intended, receipt: $0) }
         }
     }
 
@@ -341,7 +408,7 @@ enum LearnedStore {
         }
         let learned = load()
         learned.terms.forEach(insert)
-        learned.corrections.map(\.intended).forEach(insert)
+        learned.corrections.map(\.intended).filter { WhisperPrompt.isUnusual($0) }.forEach(insert)
         TextFormatter.loadDictionary().values.forEach(insert)
         SnippetStore.load().map(\.trigger).forEach(insert)
         return Array(terms.prefix(300))
@@ -351,7 +418,8 @@ enum LearnedStore {
     /// `WhisperPrompt` puts these ahead of Murmur's built-in developer terms.
     static func personalTermKeys() -> Set<String> {
         let learned = load()
-        let all = learned.terms + learned.corrections.map(\.intended)
+        // What a correction ends in counts as the user's own word only when it is a name or an unusual word.
+        let all = learned.terms + learned.corrections.map(\.intended).filter { WhisperPrompt.isUnusual($0) }
             + Array(TextFormatter.loadDictionary().values) + SnippetStore.load().map(\.trigger)
         return Set(all.map { cleanedTerm($0).lowercased() })
     }
@@ -661,6 +729,30 @@ enum LearnedStore {
               == "Planrify and RevenueCat on iOS", "names come out spelled the user's way")
         check(enforceCasing(in: "a murmur in the room, Gemini", terms: ["Murmur", "gemini", "dmg"], isKnownWord: known)
               == "a murmur in the room, Gemini", "everyday words and lowercase terms are left as they are")
+        // Undo takes back exactly what one edit saved (pure: nothing here touches the user's own file).
+        var data = LearnedData(corrections: [LearnedCorrection(heard: "Mormo", intended: "Murmur")], terms: ["Murmur"])
+        let first = record(heard: "Plondrify", intended: "Planrify", in: &data)
+        check(first.createdCorrection && first.termAdded == "Planrify" && data.corrections.count == 2
+              && data.terms.contains("Planrify"), "a new correction is saved, and its spelling joins the user's words")
+        take(back: first, from: &data)
+        check(data.corrections.map(\.heard) == ["Mormo"] && data.terms == ["Murmur"],
+              "undo removes that mapping and that word, and nothing the user already had")
+        let again = record(heard: "Mormo", intended: "Murmur", in: &data)
+        check(!again.createdCorrection && again.termAdded == nil && data.corrections[0].timesSeen == 2,
+              "a known correction seen again is counted, and puts nothing new in the words")
+        take(back: again, from: &data)
+        check(data.corrections.count == 1 && data.corrections[0].timesSeen == 1 && data.terms == ["Murmur"],
+              "undoing it leaves the correction the user already had in place")
+        var shared = LearnedData(corrections: [], terms: [])
+        let one = record(heard: "Plondrify", intended: "Planrify", in: &shared)
+        let two = record(heard: "Plumnify", intended: "Planrify", in: &shared)
+        take(back: one, from: &shared)
+        check(shared.terms.contains("Planrify") && shared.corrections.count == 1,
+              "the spelling stays while another correction still ends in it")
+        take(back: two, from: &shared)
+        // The word stays: the second edit found it already there, so it can't tell whether the user taught it.
+        check(shared.corrections.isEmpty && shared.terms == ["Planrify"],
+              "…and a word is only ever removed by the edit that put it there")
         return passed
     }
 }

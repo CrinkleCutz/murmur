@@ -270,8 +270,10 @@ private struct MurmurLogoBadge: View {
 struct AppShellRoot: View {
     @ObservedObject var app: AppDelegate
     @State private var page: Page = .home
-    @State private var pinned = Settings.railPinned
-    @State private var peeking = false
+    /// `MURMUR_RENDER_RAIL_PEEK` (command line, `--render-shell`): the rail as it is while hovered open.
+    private static let rendersPeek = ProcessInfo.processInfo.environment["MURMUR_RENDER_RAIL_PEEK"] != nil
+    @State private var pinned = Settings.railPinned && !rendersPeek
+    @State private var peeking = rendersPeek
     @State private var expandedGroups: Set<PageGroup> = {
         var groups: Set<PageGroup> = []
         if Settings.personaliseExpanded { groups.insert(.teach) }
@@ -514,6 +516,14 @@ struct AppShellRoot: View {
             Color.clear
                 .frame(width: pinned ? RailView.expandedWidth : RailView.collapsedWidth)
             pane
+                // The pointer on the page itself means it has left a rail that opened by hovering (the rail covers
+                // its own strip, so this is only ever outside it). Closing here as well doesn't rely on the rail
+                // noticing the pointer leave — which it didn't when the pointer left towards the top right.
+                .onContinuousHover { phase in
+                    guard case .active = phase, peeking, !pinned else { return }
+                    peekCloseWork?.cancel()
+                    peeking = false
+                }
         }
         // One gradient instance spanning the rail *and* the pane, not two
         // separately-scaled copies (rail used to paint its own). A
@@ -525,27 +535,47 @@ struct AppShellRoot: View {
         // showing up as a visible seam right at the rail's edge.
         .background(Palette.homeGradient)
         .overlay(alignment: .topLeading) {
-            RailView(
-                app: app, page: pageBinding, pinned: $pinned, peeking: $peeking,
-                expandedGroups: $expandedGroups,
-                onGroupCollapsedWithActivePage: { group in
-                    withAnimation(.murmurEase(0.15)) { overviewGroup = group }
-                })
-                .frame(width: (pinned || peeking) ? RailView.expandedWidth : RailView.collapsedWidth)
-                .shadow(color: .black.opacity(peeking && !pinned ? 0.26 : 0),
-                        radius: peeking && !pinned ? 16 : 0, x: 7)
-                .animation(.murmurEase(0.22), value: pinned || peeking)
-                .onHover { inside in
-                    guard !pinned else { return }
-                    peekCloseWork?.cancel()
-                    if inside {
-                        peeking = true
-                    } else {
-                        let work = DispatchWorkItem { peeking = false }
-                        peekCloseWork = work
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: work)
+            GeometryReader { body in
+                let floating = peeking && !pinned
+                RailView(
+                    app: app, page: pageBinding, pinned: $pinned, peeking: $peeking,
+                    expandedGroups: $expandedGroups,
+                    onGroupCollapsedWithActivePage: { group in
+                        withAnimation(.murmurEase(0.15)) { overviewGroup = group }
+                    })
+                    .frame(width: (pinned || peeking) ? RailView.expandedWidth : RailView.collapsedWidth)
+                    // The whole strip is the rail's, however much of it is empty — and only the strip: a clipped
+                    // background still counts as part of the view for hovering, so the surface below must not.
+                    .contentShape(Rectangle())
+                    // Opened by hovering, the rail lies over the page, so it needs a surface of its own or its labels
+                    // land on whatever is underneath. The surface is the window's own backdrop — the same gradient
+                    // at the body's full size, cut to the rail's width, so it meets the backdrop around it without a
+                    // seam — with a hairline where it ends. No shadow: the hairline is the edge.
+                    .background(alignment: .topLeading) {
+                        Palette.homeGradient
+                            .frame(width: body.size.width, height: body.size.height)
+                            .frame(width: (pinned || peeking) ? RailView.expandedWidth : RailView.collapsedWidth,
+                                   alignment: .leading)
+                            .clipped()
+                            .overlay(alignment: .trailing) {
+                                Rectangle().fill(Palette.warmInk.opacity(0.12)).frame(width: 1)
+                            }
+                            .opacity(floating ? 1 : 0)
+                            .allowsHitTesting(false)
                     }
-                }
+                    .animation(.murmurEase(0.22), value: pinned || peeking)
+                    .onHover { inside in
+                        guard !pinned else { return }
+                        peekCloseWork?.cancel()
+                        if inside {
+                            peeking = true
+                        } else {
+                            let work = DispatchWorkItem { peeking = false }
+                            peekCloseWork = work
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: work)
+                        }
+                    }
+            }
         }
     }
 
@@ -620,7 +650,7 @@ struct AppShellRoot: View {
         case .insights: InsightsPage(app: app)
         case .ask: AskPage(app: app)
         case .notetaker: NotetakerPage(app: app)
-        case .dictionary: DictionaryPage(page: pageBinding)
+        case .dictionary: DictionaryPage(page: pageBinding, app: app)
         case .training: TrainingPage(app: app, page: pageBinding)
         case .snippets: SnippetsPage(page: pageBinding)
         case .style: StylePage(app: app, page: pageBinding)

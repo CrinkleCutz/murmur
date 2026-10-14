@@ -26,6 +26,9 @@ struct DictionaryPage: View {
     @State private var draftFrom = ""
     @State private var draftTo = ""
     @State private var addingNew = false
+    @State private var importing = false
+    /// Set by onboarding's "bring your words over" row: open the import sheet as the page appears.
+    @ObservedObject var app: AppDelegate
 
     var body: some View {
         GlassPanelPage {
@@ -50,7 +53,19 @@ struct DictionaryPage: View {
                 }
             }
         }
-        .onAppear(perform: load)
+        .onAppear {
+            load()
+            if app.pendingDictionaryImport {
+                app.pendingDictionaryImport = false
+                importing = true
+            }
+        }
+        .sheet(isPresented: $importing) {
+            DictionaryImportSheet(existing: TextFormatter.loadDictionary()) { _ in
+                importing = false
+                load()
+            }
+        }
     }
 
     private var header: some View {
@@ -100,6 +115,14 @@ struct DictionaryPage: View {
                     PrimaryActionLabel(title: "Add your first word")
                 }
                 .buttonStyle(PressScaleButtonStyle(scale: 0.97))
+                Button { importing = true } label: {
+                    Text(DictionaryImport.installedSources().first.map { "Coming from \($0)? Bring your words over" }
+                         ?? "Have a list? Paste it")
+                        .font(.manrope(12.5, .medium))
+                        .foregroundStyle(Palette.sunsetDeep)
+                }
+                .buttonStyle(.plain)
+                Spacer(minLength: 0)
                 Text("Examples — not saved")
                     .font(.manrope(11.5))
                     .foregroundStyle(Palette.warmInkFaint)
@@ -131,6 +154,13 @@ struct DictionaryPage: View {
                 .overlay(RoundedRectangle(cornerRadius: Radius.sm).stroke(Palette.warmRowBorder, lineWidth: 1))
             }
             Spacer()
+            Button { importing = true } label: {
+                Text("Import")
+                    .font(.manrope(12.5, .medium))
+                    .foregroundStyle(Palette.warmInkSoft)
+                    .padding(.horizontal, 6)
+            }
+            .buttonStyle(.plain)
             Button(action: startAdding) {
                 PrimaryActionLabel(title: "Add word")
             }

@@ -17,7 +17,13 @@ import Foundation
 /// or the microphone delivers nothing, is decided per recording and needs no
 /// setting — see `MicrophoneChoice`, `onInterrupted` and `deliveredOnlyZeros`.
 final class AudioRecorder {
-    private let engine = AVAudioEngine()
+    /// Replaced by a fresh one when the microphone changes to or from a Bluetooth headset: an engine keeps the sample
+    /// rate it was first set up with (48 kHz for the Mac's microphone), a headset in call mode delivers 24 kHz, and
+    /// macOS then refuses to start ("formats don't match", -10868) — which is what "Couldn't start the microphone" with
+    /// AirPods was.
+    private var engine = AVAudioEngine()
+    /// The input device the current engine was last pointed at.
+    private var engineDeviceID: AudioDeviceID?
     private var file: AVAudioFile?
     private(set) var currentFileURL: URL?
     private(set) var isRecording = false
@@ -113,6 +119,27 @@ final class AudioRecorder {
     /// Keep each recording's start-up in `MicTimingLog` — the dictation recorder only.
     var recordsStartup = false
 
+    /// Settings ▸ Dictation ▸ "Use your AirPods’ microphone" (`useBluetoothMicrophone`): record from a connected
+    /// Bluetooth headset instead of the Mac's own microphone. Off by default — see `MicrophoneChoice`.
+    static var prefersBluetooth: Bool { UserDefaults.standard.bool(forKey: "useBluetoothMicrophone") }
+    /// For the command line's comparison: this recorder always uses this kind of microphone.
+    enum ForcedInput { case builtIn, bluetooth }
+    var forcedInput: ForcedInput?
+    /// Called once per recording, on the main thread, when the first buffer with real (non-zero) audio arrives —
+    /// for a Bluetooth headset that is the moment it has finished switching into call mode and can hear you.
+    var onFirstAudio: (() -> Void)?
+    /// A Bluetooth headset stays in call mode this long after a dictation, so the next one starts at once instead of
+    /// waiting seconds for the switch again (VoiceOS keeps its "warm stream" the same way).
+    static let bluetoothWarmSeconds: TimeInterval = 30
+    private var warmStopWork: DispatchWorkItem?
+    /// Turns a buffer that arrives in a new format (a headset changing sample rate as it switches into call mode)
+    /// into the format the file was created with.
+    private var converter: AVAudioConverter?
+    /// How often the engine was restarted during this recording after a Bluetooth headset changed its format.
+    private(set) var restartsThisRecording = 0
+
+    /// Real (non-zero) audio has arrived in this recording.
+    var hasDeliveredAudio: Bool { nonZeroFrameCount > 0 }
     /// Frames arrived and every one was exact zero: the microphone isn't delivering, it isn't a quiet room.
     var deliveredOnlyZeros: Bool { capturedFrames > 0 && nonZeroFrameCount == 0 }
     var inputIsBluetooth: Bool {
@@ -120,9 +147,25 @@ final class AudioRecorder {
     }
 
     init() {
+        observeConfigurationChanges()
+    }
+
+    private func observeConfigurationChanges() {
+        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
         ) { [weak self] _ in self?.configurationChanged() }
+    }
+
+    /// A fresh engine, for a different microphone.
+    private func replaceEngine() {
+        warmStopWork?.cancel()
+        warmStopWork = nil
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        engine = AVAudioEngine()
+        engineDeviceID = nil
+        observeConfigurationChanges()
     }
 
     deinit {
@@ -132,6 +175,24 @@ final class AudioRecorder {
     private func configurationChanged() {
         guard isRecording else { return }
         if let switched = deviceSwitchedAt, Date().timeIntervalSince(switched) < 1 { return }
+        // A Bluetooth headset that has just been asked for its microphone switches into call mode and changes its
+        // format seconds later — that is the start of this recording, not the hardware going away. Start listening
+        // again on the same headset rather than ending the dictation (which is why AirPods used to "not work at
+        // first").
+        if inputIsBluetooth, restartsThisRecording < 3, let startedAt, Date().timeIntervalSince(startedAt) < 12 {
+            restartsThisRecording += 1
+            do {
+                let input = engine.inputNode
+                input.removeTap(onBus: 0)
+                installTap(on: input)
+                engine.prepare()
+                try engine.start()
+                dictationLog.notice("mic: the Bluetooth headset switched into call mode; listening again")
+                return
+            } catch {
+                dictationLog.error("mic: couldn't listen again after the headset switched: \(error.localizedDescription, privacy: .public)")
+            }
+        }
         dictationLog.error("mic: the audio hardware changed during a recording; finishing with what was captured")
         onInterrupted?()
     }
@@ -149,11 +210,15 @@ final class AudioRecorder {
 
     func start() throws {
         guard !isRecording else { return }
+        warmStopWork?.cancel()
+        warmStopWork = nil
+        restartsThisRecording = 0
+        converter = nil
 
-        let input = engine.inputNode
         // Which microphone: the one chosen in System Settings, unless it's a
-        // Bluetooth headset or a virtual device — see `MicrophoneChoice`.
-        chooseMicrophone(on: input)
+        // Bluetooth headset or a virtual device — see `MicrophoneChoice`. It may replace the engine.
+        chooseMicrophone()
+        let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw NSError(
@@ -191,8 +256,42 @@ final class AudioRecorder {
         // at 48kHz for playback but drop to 24kHz the instant the mic is
         // engaged, so a format read a moment earlier is stale by the time
         // the tap installs: exception, process aborted.
-        input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
+        installTap(on: input)
+
+        do {
+            // A Bluetooth headset kept in call mode since the last dictation: the engine is still running.
+            if !engine.isRunning {
+                engine.prepare()
+                try engine.start()
+            }
+        } catch {
+            // Unwind completely. Leaving the tap installed while
+            // `isRecording` stayed false was a latent landmine: the next
+            // start() would sail past the guard above, install a second tap,
+            // and kill the app — so one transient audio failure permanently
+            // broke dictation until relaunch.
+            input.removeTap(onBus: 0)
+            engine.stop()
+            file = nil
+            currentFileURL = nil
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
+        isRecording = true
+    }
+
+    /// The recording tap — installed at the start, and again when a Bluetooth headset restarts the engine.
+    private func installTap(on input: AVAudioInputNode) {
+        let url = currentFileURL ?? FileManager.default.temporaryDirectory.appendingPathComponent("murmur-\(UUID().uuidString).caf")
+        // A Bluetooth headset in call mode: tap at the rate it really delivers (24 kHz for AirPods) — the engine's own
+        // idea of the format can still be the 48 kHz of music mode, and starting with that fails (-10868).
+        let hardware = input.inputFormat(forBus: 0)
+        let tapFormat: AVAudioFormat? = inputIsBluetooth && hardware.sampleRate > 0 && hardware.channelCount > 0
+            ? hardware : nil
+        input.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { [weak self] incoming, _ in
             guard let self else { return }
+            // The same format as the file, whatever the headset is sending now.
+            guard let buffer = self.matchingFileFormat(incoming) else { return }
             // The file is created from the FIRST buffer's real format rather
             // than the format read above, for the same reason. When those
             // disagreed, every write threw, `try?` swallowed it, and the
@@ -207,6 +306,9 @@ final class AudioRecorder {
             self.capturedFrames += AVAudioFramePosition(buffer.frameLength)
             if self.firstBufferAt == nil { self.firstBufferAt = Date() }
             if Self.containsNonZero(buffer) {
+                if self.nonZeroFrameCount == 0, let onFirstAudio = self.onFirstAudio {
+                    DispatchQueue.main.async(execute: onFirstAudio)
+                }
                 self.nonZeroFrameCount += AVAudioFramePosition(buffer.frameLength)
             }
             if Self.hasSignal(in: buffer, above: self.silenceRMSThreshold) {
@@ -224,23 +326,27 @@ final class AudioRecorder {
             tailWaiter?()
         }
 
-        do {
-            engine.prepare()
-            try engine.start()
-        } catch {
-            // Unwind completely. Leaving the tap installed while
-            // `isRecording` stayed false was a latent landmine: the next
-            // start() would sail past the guard above, install a second tap,
-            // and kill the app — so one transient audio failure permanently
-            // broke dictation until relaunch.
-            input.removeTap(onBus: 0)
-            engine.stop()
-            file = nil
-            currentFileURL = nil
-            try? FileManager.default.removeItem(at: url)
-            throw error
+    }
+
+    /// `incoming` as it can be written to the file: unchanged while the format is the file's, converted once the
+    /// device has changed format mid-recording, nil when it can't be converted.
+    private func matchingFileFormat(_ incoming: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let target = capturedFormat, incoming.format != target else { return incoming }
+        if converter == nil || converter?.inputFormat != incoming.format {
+            converter = AVAudioConverter(from: incoming.format, to: target)
         }
-        isRecording = true
+        guard let converter else { return nil }
+        let capacity = AVAudioFrameCount(Double(incoming.frameLength) * target.sampleRate / incoming.format.sampleRate) + 64
+        guard let output = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
+        var handed = false
+        var error: NSError?
+        converter.convert(to: output, error: &error) { _, status in
+            if handed { status.pointee = .noDataNow; return nil }
+            handed = true
+            status.pointee = .haveData
+            return incoming
+        }
+        return error == nil && output.frameLength > 0 ? output : nil
     }
 
     /// Stops recording and returns the captured audio file URL,
@@ -249,7 +355,7 @@ final class AudioRecorder {
     func stop() -> URL? {
         guard isRecording else { return nil }
         engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        stopEngineOrKeepWarm()
         isRecording = false
         file = nil
         tailLock.lock()
@@ -277,6 +383,23 @@ final class AudioRecorder {
         let url = currentFileURL
         currentFileURL = nil
         return url
+    }
+
+    /// A Bluetooth headset chosen on purpose stays in call mode for `bluetoothWarmSeconds` (the engine keeps running
+    /// with no tap, so nothing is recorded); anything else stops at once.
+    private func stopEngineOrKeepWarm() {
+        warmStopWork?.cancel()
+        guard inputIsBluetooth, Self.prefersBluetooth || forcedInput == .bluetooth else {
+            engine.stop()
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.isRecording else { return }
+            self.engine.stop()
+            dictationLog.info("mic: let the Bluetooth headset go back to music mode")
+        }
+        warmStopWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.bluetoothWarmSeconds, execute: work)
     }
 
     /// Stops once the audio still in flight when the key came up has arrived — the tap hands audio over in blocks of
@@ -367,7 +490,18 @@ final class AudioRecorder {
 
     /// Points the input node at the microphone `MicrophoneChoice` picks. Best-effort: any failure leaves the node on
     /// whatever it was already using.
-    private func chooseMicrophone(on input: AVAudioInputNode) {
+    private func chooseMicrophone() {
+        // The device this recording should use, decided before touching the engine: going to or from a Bluetooth
+        // headset needs a fresh engine (see `engine`).
+        let wanted = Self.wantedInputDevice(forcedInput: forcedInput)
+        // Also when the engine is still holding a headset in call mode (`stopEngineOrKeepWarm`) and this recording
+        // wants another microphone: measured 2026-10-14, the Mac's microphone delivered nothing at all while the same
+        // process held AirPods in call mode.
+        if let wanted, engineDeviceID != wanted.id, MicrophoneChoice.isBluetooth(wanted) || inputIsBluetooth {
+            replaceEngine()
+            dictationLog.info("mic route: a fresh audio engine for the \(Self.transportName(wanted.transport), privacy: .public) microphone")
+        }
+        let input = engine.inputNode
         guard let unit = input.audioUnit else {
             dictationLog.error("mic route: no input AudioUnit yet")
             return
@@ -376,7 +510,12 @@ final class AudioRecorder {
         let defaultID = Self.defaultInputDeviceID()
         var choice = MicrophoneChoice.choose(
             systemDefault: devices.first { $0.id == defaultID }, all: devices,
-            builtInDisplayActive: Self.builtInDisplayActive())
+            builtInDisplayActive: Self.builtInDisplayActive(), prefersBluetooth: Self.prefersBluetooth)
+        switch forcedInput {
+        case .builtIn: choice = devices.first { $0.transport == kAudioDeviceTransportTypeBuiltIn }?.id ?? choice
+        case .bluetooth: choice = devices.first { MicrophoneChoice.isBluetooth($0) }?.id ?? choice
+        case nil: break
+        }
         // Debug only (the command line's microphone check): "builtin" to time the Mac's own microphone.
         if ProcessInfo.processInfo.environment["MURMUR_MIC"] == "builtin" {
             choice = devices.first { $0.transport == kAudioDeviceTransportTypeBuiltIn }?.id ?? choice
@@ -390,14 +529,34 @@ final class AudioRecorder {
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
         let read = AudioUnitGetProperty(
             unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &current, &size)
-        guard read != noErr || current != deviceID else { return }
+        guard read != noErr || current != deviceID else {
+            engineDeviceID = deviceID
+            return
+        }
         deviceSwitchedAt = Date()
         let status = AudioUnitSetProperty(
             unit, kAudioOutputUnitProperty_CurrentDevice,
             kAudioUnitScope_Global, 0,
             &deviceID, UInt32(MemoryLayout<AudioDeviceID>.size))
+        engineDeviceID = deviceID
         dictationLog.info(
             "mic route: \(choice == nil ? "system default" : "instead of the default", privacy: .public) device \(deviceID) (\(Self.transportName(self.inputTransport), privacy: .public)) -> status \(status)")
+    }
+
+    /// The input a recording would use now, as a device — `MicrophoneChoice` plus the command line's forced input.
+    private static func wantedInputDevice(forcedInput: ForcedInput?) -> MicrophoneChoice.Device? {
+        let devices = inputDevices()
+        let defaultID = defaultInputDeviceID()
+        var choice = MicrophoneChoice.choose(
+            systemDefault: devices.first { $0.id == defaultID }, all: devices,
+            builtInDisplayActive: builtInDisplayActive(), prefersBluetooth: prefersBluetooth)
+        switch forcedInput {
+        case .builtIn: choice = devices.first { $0.transport == kAudioDeviceTransportTypeBuiltIn }?.id ?? choice
+        case .bluetooth: choice = devices.first { MicrophoneChoice.isBluetooth($0) }?.id ?? choice
+        case nil: break
+        }
+        let id = choice ?? defaultID
+        return devices.first { $0.id == id }
     }
 
     /// Every device with an input side, with how it's connected.
@@ -431,6 +590,14 @@ final class AudioRecorder {
             deviceID != 0
         else { return nil }
         return deviceID
+    }
+
+    /// The Mac's chosen input in System Settings is a Bluetooth device — for Settings to say why Murmur doesn't simply
+    /// use it (`MicrophoneChoice`).
+    static func systemDefaultInputIsBluetooth() -> Bool {
+        guard let id = defaultInputDeviceID() else { return false }
+        let transport = transportType(id)
+        return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
     }
 
     private static func transportType(_ deviceID: AudioDeviceID) -> UInt32 {
@@ -593,7 +760,18 @@ enum MicrophoneChoice {
         kAudioDeviceTransportTypeFireWire, kAudioDeviceTransportTypeAVB,
     ]
 
-    static func choose(systemDefault: Device?, all: [Device], builtInDisplayActive: Bool) -> AudioDeviceID? {
+    static func isBluetooth(_ device: Device) -> Bool {
+        device.transport == kAudioDeviceTransportTypeBluetooth || device.transport == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    /// `prefersBluetooth` (the user's "Use your AirPods’ microphone"): a connected Bluetooth headset wins — the one
+    /// chosen in System Settings if that is one, else the first connected.
+    static func choose(systemDefault: Device?, all: [Device], builtInDisplayActive: Bool,
+                       prefersBluetooth: Bool = false) -> AudioDeviceID? {
+        if prefersBluetooth {
+            if let systemDefault, isBluetooth(systemDefault) { return nil }
+            if let headset = all.first(where: isBluetooth) { return headset.id }
+        }
         func usable(_ device: Device) -> Bool {
             wired.contains(device.transport)
                 && (device.transport != kAudioDeviceTransportTypeBuiltIn || builtInDisplayActive)
@@ -618,6 +796,11 @@ enum MicrophoneChoice {
         let everything = [builtIn, airPods, studioDisplay, teams]
         check(choose(systemDefault: airPods, all: everything, builtInDisplayActive: true) == 1,
               "AirPods as the default, lid open: the built-in mic, as before")
+        check(choose(systemDefault: airPods, all: everything, builtInDisplayActive: true, prefersBluetooth: true) == nil
+              && choose(systemDefault: builtIn, all: everything, builtInDisplayActive: true, prefersBluetooth: true) == 2,
+              "AirPods microphone switched on: the headset, whether or not it is the system default")
+        check(choose(systemDefault: builtIn, all: [builtIn, studioDisplay], builtInDisplayActive: true, prefersBluetooth: true) == nil,
+              "…and with no headset connected, the usual choice")
         check(choose(systemDefault: studioDisplay, all: everything, builtInDisplayActive: true) == 1,
               "lid open: the built-in mic even when a display mic is the default — it starts 0.4 s sooner")
         check(choose(systemDefault: builtIn, all: everything, builtInDisplayActive: true) == nil,

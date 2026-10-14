@@ -57,6 +57,7 @@ enum UnsureWordFix {
     /// words fits, and only when spelled closely — a screen can hold hundreds of names, not a few dozen.
     static func fix(
         _ text: String, words: [Word], terms: [String], screenNames: [String]? = nil,
+        ownWords: Set<String>? = LearnedStore.personalTermKeys(),
         isKnownWord: (String) -> Bool = HarperChecker.isKnownEnglishWord
     ) -> (text: String, changes: [(heard: String, name: String)])? {
         // Debug only (command line): as if none of the user's words were known, to measure the names on screen alone.
@@ -67,7 +68,8 @@ enum UnsureWordFix {
             FileHandle.standardError.write(Data(("WORDS " + words.map { "\($0.text)(\(String(format: "%.2f", $0.confidence)))" }
                 .joined(separator: " ") + "\n").utf8))
         }
-        guard let replacements = replacements(in: words, terms: terms, screenNames: screenNames, isKnownWord: isKnownWord)
+        guard let replacements = replacements(
+            in: words, terms: terms, screenNames: screenNames, ownWords: ownWords, isKnownWord: isKnownWord)
         else { return nil }
         var result = text
         var searchFrom = result.startIndex
@@ -94,12 +96,23 @@ enum UnsureWordFix {
         similarity >= 0.5 || (spanKey == nameKey && spanKey.count >= 2)
     }
 
+    ///
+    /// `ownWords` (lower case, nil = every term): the words the user taught or corrected. Any other term is one of
+    /// Murmur's built-in developer words, and there are hundreds of those, so — like a name on screen — one only
+    /// replaces a word spelled close to it or sounding exactly like it. With the user's own looser rule they took real
+    /// words in live use (2026-10-08 to 10: "Notetaker" → "Docker" twice, "Compability" → "Copilot", "MacPro" → "MCP").
+    static func builtInTermAllowed(similarity: Double, spanKey: String, nameKey: String) -> Bool {
+        similarity >= 0.72 || (spanKey == nameKey && spanKey.count >= 2)
+    }
+
     static func replacements(
-        in words: [Word], terms: [String], screenNames: [String] = [], isKnownWord: (String) -> Bool
+        in words: [Word], terms: [String], screenNames: [String] = [], ownWords: Set<String>? = nil,
+        isKnownWord: (String) -> Bool
     ) -> [(words: [String], with: String)]? {
         func candidate(_ term: String, fromScreen: Bool)
-            -> (term: String, letters: String, key: String, words: Int, fromScreen: Bool) {
-            (term, letters(term), phoneticKey(term), term.split(separator: " ").count, fromScreen)
+            -> (term: String, letters: String, key: String, words: Int, fromScreen: Bool, builtIn: Bool) {
+            (term, letters(term), phoneticKey(term), term.split(separator: " ").count, fromScreen,
+             !fromScreen && ownWords.map { !$0.contains(LearnedStore.cleanedTerm(term).lowercased()) } == true)
         }
         let own = terms
             .filter { WhisperPrompt.isWorthMentioning($0, isKnownWord: isKnownWord) }
@@ -147,6 +160,10 @@ enum UnsureWordFix {
                     if allKnown && similarity < 0.9 { accepted = false }
                     if candidate.fromScreen,
                        !screenNameAllowed(similarity: similarity, spanKey: spanKey, nameKey: candidate.key) {
+                        accepted = false
+                    }
+                    if candidate.builtIn,
+                       !builtInTermAllowed(similarity: similarity, spanKey: spanKey, nameKey: candidate.key) {
                         accepted = false
                     }
                     // The user's own word beats any name on screen; otherwise the closer spelling wins.
@@ -230,7 +247,7 @@ enum UnsureWordFix {
         let terms = ["Manrope", "Parakeet", "Murmur", "Vercel", "Claude", "Warp", "Wispr Flow", "Planrify", "Stripe"]
         func sample(_ spec: [(String, Float)]) -> [Word] { spec.map { Word(text: $0.0, confidence: $0.1) } }
         func run(_ spec: [(String, Float)]) -> String? {
-            fix(spec.map(\.0).joined(separator: " "), words: sample(spec), terms: terms, isKnownWord: isKnown)?.text
+            fix(spec.map(\.0).joined(separator: " "), words: sample(spec), terms: terms, ownWords: nil, isKnownWord: isKnown)?.text
         }
 
         check(run([("We", 0.9), ("use", 0.9), ("the", 0.9), ("Manrog", 0.3), ("font.", 0.9)])
@@ -253,10 +270,10 @@ enum UnsureWordFix {
         check(run([("look", 0.9), ("up", 0.5), ("Whisperflow", 0.4), ("and", 0.9)]) == nil,
               "…not even when the recognizer ran the name together (up Whisperflow)")
         check(fix("Runs on whisper.cpp now", words: sample([("Runs", 0.9), ("on", 0.9), ("whisper.cpp", 0.3), ("now", 0.9)]),
-                  terms: terms + ["whisper.cpp", "WhisperKit"], isKnownWord: isKnown) == nil,
+                  terms: terms + ["whisper.cpp", "WhisperKit"], ownWords: nil, isKnownWord: isKnown) == nil,
               "a word that already is one of the names is never swapped for a similar one")
         check(fix("the critical  edge of Manrog", words: sample([("the", 0.9), ("criticaledge", 0.9), ("of", 0.9),
-                                                                 ("Manrog", 0.2)]), terms: terms, isKnownWord: isKnown)?.text
+                                                                 ("Manrog", 0.2)]), terms: terms, ownWords: nil, isKnownWord: isKnown)?.text
               == "the critical  edge of Manrope", "only the name changes; the rest keeps the recognizer's own text")
         check(words(fromTokens: [(" Man", 0.9), ("rog", 0.2), (",", 0.1), (" font", 0.9)])
               == [Word(text: "Manrog,", confidence: 0.2), Word(text: "font", confidence: 0.9)],
@@ -268,25 +285,35 @@ enum UnsureWordFix {
         // A contraction is an ordinary word, and a one-sound match isn't enough (the live "you've" → "Vue").
         check(fix("after you've done the research", words: sample([("after", 0.9), ("you've", 0.3), ("done", 0.9),
                                                                      ("the", 0.9), ("research", 0.9)]),
-                  terms: ["Vue", "Vercel"], isKnownWord: isKnown) == nil,
+                  terms: ["Vue", "Vercel"], ownWords: nil, isKnownWord: isKnown) == nil,
               "\"you've\" is never swapped for a name (Vue)")
         check(isOrdinaryWord("you've", isKnownWord: { $0 == "you" }) && isOrdinaryWord("don’t", isKnownWord: { $0 == "do" })
               && !isOrdinaryWord("Manrog", isKnownWord: { _ in false }), "contractions count as ordinary words")
         // Names on screen: used when none of the user's words fits; a loose spelling needs an exact sound skeleton.
         check(fix("We moved to Superbase", words: sample([("We", 0.9), ("moved", 0.9), ("to", 0.9), ("Superbase", 0.3)]),
-                  terms: [], screenNames: ["Supabase", "Vilnius"], isKnownWord: isKnown)?.text == "We moved to Supabase",
+                  terms: [], screenNames: ["Supabase", "Vilnius"], ownWords: nil, isKnownWord: isKnown)?.text == "We moved to Supabase",
               "a name on screen fixes an unsure word the user never taught")
         check(fix("the Manrog font", words: sample([("the", 0.9), ("Manrog", 0.2), ("font", 0.9)]),
-                  terms: ["Manrope"], screenNames: ["Manrog2", "Manrose"], isKnownWord: isKnown)?.text == "the Manrope font",
+                  terms: ["Manrope"], screenNames: ["Manrog2", "Manrose"], ownWords: nil, isKnownWord: isKnown)?.text == "the Manrope font",
               "…and the user's own word comes first")
         check(fix("the Fliss test", words: sample([("the", 0.9), ("Fliss", 0.3), ("test", 0.9)]),
-                  terms: [], screenNames: ["Vilnius"], isKnownWord: isKnown) == nil
+                  terms: [], screenNames: ["Vilnius"], ownWords: nil, isKnownWord: isKnown) == nil
               && fix("on EOS", words: sample([("on", 0.9), ("EOS", 0.3)]),
-                     terms: [], screenNames: ["Cesis"], isKnownWord: isKnown) == nil,
+                     terms: [], screenNames: ["Cesis"], ownWords: nil, isKnownWord: isKnown) == nil,
               "…but a loose match to one of many names on screen is not taken (Fliss → Vilnius, EOS → Cesis)")
         check(fix("on Parricate", words: sample([("on", 0.9), ("Parricate", 0.3)]),
-                  terms: [], screenNames: ["Parakeet"], isKnownWord: isKnown)?.text == "on Parakeet",
+                  terms: [], screenNames: ["Parakeet"], ownWords: nil, isKnownWord: isKnown)?.text == "on Parakeet",
               "…while one that sounds exactly alike is (Parricate → Parakeet)")
+        // Murmur's built-in developer words: a closer match than the user's own.
+        func builtIn(_ heard: String, _ term: String, own: Set<String> = []) -> String? {
+            fix(heard, words: [Word(text: heard, confidence: 0.3)], terms: [term], screenNames: [], ownWords: own,
+                isKnownWord: isKnown)?.text
+        }
+        check(builtIn("Notetaker", "Docker") == nil && builtIn("Compability", "Copilot") == nil
+              && builtIn("MacPro", "MCP") == nil, "a built-in term doesn't take a word that only sounds near it")
+        check(builtIn("Superbase", "Supabase") == "Supabase" && builtIn("Parricate", "Parakeet") == "Parakeet",
+              "…but still fixes one spelled close to it or sounding exactly like it")
+        check(builtIn("Eversal", "Vercel", own: ["vercel"]) == "Vercel", "…and the user's own word keeps its looser rule")
         return passed
     }
 }

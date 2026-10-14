@@ -1,6 +1,13 @@
 import AppKit
 import ApplicationServices
 
+/// A correction Murmur just learned from an edit, with what is needed to take it back.
+struct LearnedNotice {
+    let heard: String
+    let intended: String
+    let receipt: LearnReceipt
+}
+
 /// Learns from the corrections the user makes right after a dictation lands — Wispr Flow's "Auto-add to Dictionary",
 /// VoiceInk's "Auto Learn". Follows VoiceInk's open-source design: right after the paste, find the dictation in the
 /// field and note the text on either side of it, so it can be found again however the field changes around it; stop
@@ -28,6 +35,8 @@ enum EditLearner {
         /// The newest reading, and the newest one that was the same two readings in a row.
         var latest: String
         var steady: String?
+        /// Where this dictation came from, for `EditRecordStore`.
+        var draft: EditRecordDraft?
     }
 
     static var isEnabled: Bool { UserDefaults.standard.object(forKey: "learnFromEdits") as? Bool ?? true }
@@ -36,7 +45,7 @@ enum EditLearner {
     /// Fields longer than this aren't watched (a whole document is read each time).
     static let maximumFieldLength = 100_000
     /// Called on the main queue with whatever was learned.
-    nonisolated(unsafe) static var onLearned: (([(heard: String, intended: String)]) -> Void)?
+    nonisolated(unsafe) static var onLearned: (([LearnedNotice]) -> Void)?
 
     private static let queue = DispatchQueue(label: "local.murmur.edit-learner", qos: .utility)
     // Only touched on `queue`.
@@ -45,7 +54,11 @@ enum EditLearner {
 
     /// Right before a paste: the focused field, or nil when there's nothing to watch (a password field, no field).
     static func watchBeforePaste() -> Target? {
-        guard isEnabled, let element = focusedElement() else { return nil }
+        guard isEnabled else { return nil }
+        guard let element = focusedElement() else {
+            dictationLog.notice("edit learning: the app in front has no field Murmur can read")
+            return nil
+        }
         // Murmur's own fields (Scratchpad) are edited in Murmur, where History already learns.
         var pid: pid_t = 0
         guard AXUIElementGetPid(element, &pid) == .success, pid != ProcessInfo.processInfo.processIdentifier
@@ -54,7 +67,7 @@ enum EditLearner {
     }
 
     /// The paste landed: whatever an earlier dictation's field shows now is final, and this one is watched.
-    static func track(_ target: Target, inserted: String) {
+    static func track(_ target: Target, inserted: String, draft: EditRecordDraft? = nil) {
         queue.async {
             finish(readAgain: true, reason: "next paste")
             generation += 1
@@ -63,7 +76,7 @@ enum EditLearner {
             for delay in [0.15, 0.6] {
                 queue.asyncAfter(deadline: .now() + delay) {
                     guard current == generation, session == nil else { return }
-                    begin(target.element, inserted: inserted, generation: current, lastTry: delay == 0.6)
+                    begin(target.element, inserted: inserted, draft: draft, generation: current, lastTry: delay == 0.6)
                 }
             }
         }
@@ -76,7 +89,8 @@ enum EditLearner {
 
     // MARK: - Watching
 
-    private static func begin(_ element: AXUIElement, inserted: String, generation current: Int, lastTry: Bool) {
+    private static func begin(_ element: AXUIElement, inserted: String, draft: EditRecordDraft?, generation current: Int,
+                              lastTry: Bool) {
         AXUIElementSetMessagingTimeout(element, 0.2)
         guard let field = text(of: element), let caret = caretEnd(of: element),
               let range = pastedRange(of: inserted, in: field, caret: caret) else {
@@ -92,7 +106,7 @@ enum EditLearner {
             for: NSRange(location: afterStart, length: min(16, ns.length - afterStart))))
         let landed = ns.substring(with: range)
         session = Session(element: element, inserted: landed, before: before, after: after, started: Date(),
-                          latest: landed, steady: landed)
+                          latest: landed, steady: landed, draft: draft)
         dictationLog.notice("edit learning: watching the field")
         schedulePoll(generation: current, fieldLength: ns.length)
     }
@@ -110,10 +124,23 @@ enum EditLearner {
                 finish(readAgain: true, reason: "the field lost focus")
                 return
             }
-            guard let field = text(of: watched.element),
-                  let region = region(in: field, before: watched.before, after: watched.after),
-                  stillHolds(watched.inserted, in: region) else {
-                // Sent, cleared, undone or rewritten: the readings so far are all there is.
+            // Sent, cleared, undone or rewritten: the readings so far are all there is. Which of them it was is logged,
+            // so a day's log shows whether the watch ends because the message was sent or because it lost its place.
+            guard let field = text(of: watched.element) else {
+                finish(readAgain: false, reason: "the field could no longer be read")
+                return
+            }
+            guard !field.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                finish(readAgain: false, reason: "the field was emptied (sent or deleted)")
+                return
+            }
+            guard let region = region(in: field, before: watched.before, after: watched.after) else {
+                finish(readAgain: false, reason: stillHolds(watched.inserted, in: field)
+                    ? "the text around the dictation changed, though the dictation is still there"
+                    : "the dictation left the field (sent or deleted)")
+                return
+            }
+            guard stillHolds(watched.inserted, in: region) else {
                 finish(readAgain: false, reason: "the dictation left the field (sent or deleted)")
                 return
             }
@@ -139,8 +166,15 @@ enum EditLearner {
         dictationLog.notice("edit learning: stopped watching — \(reason, privacy: .public)")
         guard let steady = watched.steady else { return }
         // Only the corrections Murmur now makes by itself are announced (a heard everyday word only teaches the name).
-        let learned = agreedPairs(original: watched.inserted, steady: steady, latest: watched.latest)
-            .filter { LearnedStore.add(heard: $0.heard, intended: $0.intended) }
+        let learned: [LearnedNotice] = agreedPairs(original: watched.inserted, steady: steady, latest: watched.latest)
+            .compactMap { pair in
+                LearnedStore.addTracked(heard: pair.heard, intended: pair.intended)
+                    .map { LearnedNotice(heard: pair.heard, intended: pair.intended, receipt: $0) }
+            }
+        if let draft = watched.draft {
+            // The words the field held at the end — the same region the corrections were read from.
+            EditRecordStore.complete(draft, final: steady, reason: reason, learned: learned.count)
+        }
         guard !learned.isEmpty else { return }
         dictationLog.notice("edit learning: learned \(learned.count) correction(s) from an edit after pasting")
         DispatchQueue.main.async { onLearned?(learned) }

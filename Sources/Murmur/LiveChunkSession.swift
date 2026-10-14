@@ -15,7 +15,7 @@ import Foundation
 /// sentences from it (errors on the recordings that were cut 2.0% → 3.7%); without it, 3.2% → 3.1%, and the
 /// sentence it had invented at the end of a 45-second recording was gone.
 ///
-/// Nothing changes for a dictation shorter than `ChunkPlanner.minimumChunk` plus a pause: no cut is ever made, and
+/// Nothing changes for a dictation shorter than `ChunkPlanner.forceCutAt`: no cut is ever made, and
 /// `finish` returns nil so the caller runs the unchanged whole-recording path. Any failure does the same.
 @MainActor
 final class LiveChunkSession {
@@ -46,6 +46,8 @@ final class LiveChunkSession {
     /// Debug only, for measuring the cost of a cut from the command line: a shorter minimum stretch, so more cuts.
     private let minimumChunk = ProcessInfo.processInfo.environment["MURMUR_CHUNK_MIN"].flatMap(Double.init)
         ?? ChunkPlanner.minimumChunk
+    /// With that debug minimum, a cut is made as soon as it is reached.
+    private let cutAfter = ProcessInfo.processInfo.environment["MURMUR_CHUNK_MIN"] == nil ? ChunkPlanner.forceCutAt : 0
 
     init(
         engine: WhisperCppEngine, vad vadProvider: @escaping () async -> VadManager?,
@@ -83,7 +85,7 @@ final class LiveChunkSession {
         let frameSeconds = Double(VadManager.chunkSize) / Double(VadManager.sampleRate)
         guard let cut = ChunkPlanner.nextCut(
             probabilities: probabilities, frameSeconds: frameSeconds, from: committedSeconds,
-            minimumChunk: minimumChunk) else { return }
+            minimumChunk: minimumChunk, cutAfter: cutAfter) else { return }
         let from = Int(committedSeconds * 16000), to = min(Int(cut * 16000), samples.count)
         guard to > from else { return }
         let stretch = Array(samples[from..<to])
@@ -228,10 +230,14 @@ extension LiveChunkSession {
 
 /// Where to cut a dictation that is still being spoken. Pure, so it can be tested without audio.
 enum ChunkPlanner {
-    /// No cut until this much audio has built up since the last one: every dictation shorter than this is decoded
-    /// whole, exactly as before, and each stretch keeps enough context for Whisper to punctuate it well.
+    /// A cut is never placed sooner than this after the last one, so each stretch keeps enough context for Whisper to
+    /// punctuate it well.
     static let minimumChunk = 16.0
-    /// Past this, cut at the quietest moment even without a clear pause, so no stretch spills into a second window.
+    /// Nothing is cut before this much audio has built up since the last cut: a dictation that fits in one of
+    /// Whisper's 30-second windows is decoded whole, since a cut saves it no waiting and costs it context (measured
+    /// 2026-10-11, the 150 test recordings cut at 16 s against whole: 3.50% word errors against 3.36%, six worse and
+    /// two better, the worse ones accented voices). Past it, the cut goes in the latest clear pause — or, with none,
+    /// at the quietest moment — so no stretch spills into a second window.
     static let forceCutAt = 27.0
     /// A pause at least this long is a place a sentence or clause ends.
     static let minimumPause = 0.5
@@ -239,11 +245,12 @@ enum ChunkPlanner {
 
     /// The next cut, in seconds from the start, or nil to keep listening.
     static func nextCut(
-        probabilities: [Float], frameSeconds: Double, from committed: Double, minimumChunk: Double = minimumChunk
+        probabilities: [Float], frameSeconds: Double, from committed: Double, minimumChunk: Double = minimumChunk,
+        cutAfter: Double = forceCutAt
     ) -> Double? {
         let first = Int((committed / frameSeconds).rounded())
         guard probabilities.count > first,
-              Double(probabilities.count - first) * frameSeconds >= minimumChunk else { return nil }
+              Double(probabilities.count - first) * frameSeconds >= max(minimumChunk, cutAfter) else { return nil }
         let earliest = first + Int(minimumChunk / frameSeconds)
         let pauseFrames = max(1, Int((minimumPause / frameSeconds).rounded(.up)))
         // The latest pause that is long enough, cut in its middle.
@@ -260,7 +267,6 @@ enum ChunkPlanner {
             }
         }
         if let best { return Double(best) * frameSeconds }
-        guard Double(probabilities.count - first) * frameSeconds >= forceCutAt else { return nil }
         let window = earliest..<max(earliest + 1, probabilities.count - 1)
         guard let quietest = window.filter({ $0 < probabilities.count }).min(by: { probabilities[$0] < probabilities[$1] })
         else { return nil }
@@ -280,20 +286,23 @@ enum ChunkPlanner {
         }
         let f = 0.256
         func frames(_ seconds: Double, _ p: Float) -> [Float] { Array(repeating: p, count: Int((seconds / f).rounded())) }
-        check(nextCut(probabilities: frames(15, 0.9), frameSeconds: f, from: 0) == nil, "nothing is cut before 16 s")
         let paused = frames(10, 0.9) + frames(1, 0.1) + frames(8, 0.9) + frames(0.8, 0.1) + frames(2, 0.9)
-        let cut = nextCut(probabilities: paused, frameSeconds: f, from: 0)
-        check(cut.map { $0 > 18.5 && $0 < 19.6 } == true, "cuts in the latest pause after 16 s (got \(cut ?? -1))")
-        let early = frames(10, 0.9) + frames(1, 0.1) + frames(8, 0.9)
+        check(nextCut(probabilities: paused, frameSeconds: f, from: 0) == nil,
+              "a dictation that fits in one pass is never cut, pauses or not")
+        let cut = nextCut(probabilities: paused + frames(6, 0.9), frameSeconds: f, from: 0)
+        check(cut.map { $0 > 18.5 && $0 < 19.6 } == true, "past 27 s: the latest pause after 16 s (got \(cut ?? -1))")
+        let early = frames(10, 0.9) + frames(1, 0.1) + frames(15, 0.9)
         check(nextCut(probabilities: early, frameSeconds: f, from: 0) == nil, "a pause before 16 s is not used")
-        let breath = frames(17, 0.9) + frames(0.25, 0.1) + frames(3, 0.9)
+        let breath = frames(17, 0.9) + frames(0.25, 0.1) + frames(9, 0.9)
         check(nextCut(probabilities: breath, frameSeconds: f, from: 0) == nil, "a breath is not a pause")
         let unbroken = frames(18, 0.9) + frames(0.3, 0.6) + frames(10, 0.9)
         let forced = nextCut(probabilities: unbroken, frameSeconds: f, from: 0)
         check(forced.map { abs($0 - 18.2) < 0.4 } == true, "no pause by 27 s: the quietest moment (got \(forced ?? -1))")
-        let second = paused + frames(20, 0.9) + frames(1, 0.1) + frames(1, 0.9)
+        let second = paused + frames(26, 0.9) + frames(1, 0.1) + frames(1, 0.9)
         let next = nextCut(probabilities: second, frameSeconds: f, from: 18.5)
         check(next.map { $0 > 34.5 } == true, "the next cut counts from the last one (got \(next ?? -1))")
+        check(nextCut(probabilities: paused, frameSeconds: f, from: 0, cutAfter: 0).map { $0 > 18.5 && $0 < 19.6 } == true,
+              "the debug minimum cuts as soon as it is reached")
         check(join(["First part.", "", "and the rest."]) == "First part. and the rest.", "stretches join with a space")
         return passed
     }

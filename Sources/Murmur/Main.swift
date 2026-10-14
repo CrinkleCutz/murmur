@@ -76,6 +76,22 @@ struct MurmurMain {
             case "--render-settings":
                 guard let path = arguments.next() else { usageAndExit() }
                 mode = .renderSettings(path)
+            case "--duck-check":
+                mode = .duckCheck
+            case "--mic-compare":
+                guard let seconds = arguments.next().flatMap(Double.init), let dir = arguments.next() else { usageAndExit() }
+                mode = .micCompare(seconds, dir)
+            case "--edit-records":
+                mode = .editRecords
+            case "--render-shell":
+                guard let path = arguments.next() else { usageAndExit() }
+                mode = .renderShell(path)
+            case "--render-sheets":
+                guard let path = arguments.next() else { usageAndExit() }
+                mode = .renderSheets(path)
+            case "--render-toast":
+                guard let path = arguments.next() else { usageAndExit() }
+                mode = .renderToast(path)
             case "--render-snippets":
                 guard let path = arguments.next() else { usageAndExit() }
                 mode = .renderSnippets(path)
@@ -110,6 +126,13 @@ struct MurmurMain {
                 let key = arguments.next() ?? ""
                 guard !server.isEmpty, !key.isEmpty else { usageAndExit() }
                 mode = .licenseLiveCheck(server, key)
+            case "--support-check":
+                let server = arguments.next() ?? ""
+                let text = arguments.next() ?? ""
+                guard !server.isEmpty, !text.isEmpty else { usageAndExit() }
+                mode = .supportCheck(server, text)
+            case "--render-support":
+                mode = .renderSupport(arguments.next() ?? NSTemporaryDirectory() + "murmur-support")
             case "--license-ui-check":
                 mode = .licenseUICheck(arguments.next() ?? NSTemporaryDirectory() + "murmur-license-ui")
             case "--notetaker-check":
@@ -155,6 +178,8 @@ struct MurmurMain {
             case "--gemma-edit":
                 guard let text = arguments.next() else { usageAndExit() }
                 mode = .gemmaEdit(text)
+            case "--whisper-prompt":
+                mode = .whisperPrompt
             case "--layout":
                 guard let text = arguments.next() else { usageAndExit() }
                 mode = .layout(text)
@@ -261,6 +286,10 @@ struct MurmurMain {
             let unsureWordsPassed = UnsureWordFix.runSelfTest()
             let cursorPassed = InsertionShaper.runSelfTest()
             let editLearnerPassed = EditLearner.runSelfTest()
+            let sentLearnerPassed = SentMessageLearner.runSelfTest()
+            let editRecordsPassed = EditRecordStore.runSelfTest()
+            let dictionaryImportPassed = DictionaryImport.runSelfTest()
+            let pasteLastPassed = PasteLastShortcut.runSelfTest()
             let screenNamesPassed = ScreenContext.runSelfTest()
             let transformGuardPassed = TransformGuard.runSelfTest()
             let destinationPassed = DestinationDetector.runSelfTest()
@@ -277,7 +306,7 @@ struct MurmurMain {
                  && profilesPassed && audioPassed && hallucinationPassed
                  && developerVocabPassed && transformsPassed && plausibilityPassed
                  && harperPassed && guardPassed && trimmerPassed && correctionsPassed && timesPassed && matchAppPassed && shortcutKeysPassed && healthPassed && pastePassed
-                 && secureInputPassed && styleGuardPassed && notchPassed && navBarPassed && licenseTokenPassed && licenseGatePassed && licenseStorePassed && updateSelectionPassed && licenseTilePassed && licensePreviewPassed && whisperPromptPassed && liveChunksPassed && microphonePassed && unsureWordsPassed && cursorPassed && editLearnerPassed && screenNamesPassed && transformGuardPassed && destinationPassed && templateLayoutPassed && rewritePromptPassed && snippetsPassed && cleanupLanguagesPassed && spokenCommandsPassed && spokenCodePassed && projectNamesPassed && codeFieldsPassed && translatePassed ? 0 : 1)
+                 && secureInputPassed && styleGuardPassed && notchPassed && navBarPassed && licenseTokenPassed && licenseGatePassed && licenseStorePassed && updateSelectionPassed && licenseTilePassed && licensePreviewPassed && whisperPromptPassed && liveChunksPassed && microphonePassed && unsureWordsPassed && cursorPassed && editLearnerPassed && sentLearnerPassed && editRecordsPassed && dictionaryImportPassed && pasteLastPassed && screenNamesPassed && transformGuardPassed && destinationPassed && templateLayoutPassed && rewritePromptPassed && snippetsPassed && cleanupLanguagesPassed && spokenCommandsPassed && spokenCodePassed && projectNamesPassed && codeFieldsPassed && translatePassed ? 0 : 1)
 
         case .pipelineBench(let path):
             // Recognizer decode + cleanup call, with and without starting the cleanup prompt's fixed prefix at the
@@ -403,6 +432,38 @@ struct MurmurMain {
             case .failure(let problem):
                 print("refused \(problem)")
                 exit(1)
+            }
+
+        case .supportCheck(let server, let text):
+            // Sends one real report through the app's own sender to a real server, and says what came back. The
+            // message is the argument; the facts are this Mac's, exactly as the sheet would send them.
+            guard let base = URL(string: server) else { usageAndExit() }
+            let payload = await MainActor.run {
+                SupportReport.Payload(message: text, email: "", diagnostics: SupportReport.diagnostics())
+            }
+            print("sending: \(payload.diagnostics)")
+            let outcome = await SupportReport.send(payload, to: base.appendingPathComponent("api/support"))
+            print("outcome: \(outcome)")
+            exit(outcome == .sent ? 0 : 1)
+
+        case .renderSupport(let path):
+            // The report sheet drawn to <path>-sheet.png in a window that is never shown.
+            NSApplication.shared.setActivationPolicy(.accessory)
+            MainActor.assumeIsolated {
+                FontLoader.registerManrope()
+                let hosting = NSHostingView(rootView: AnyView(SupportReportSheet(onDone: {}, height: 560)))
+                hosting.frame = NSRect(x: 0, y: 0, width: 540, height: 560)
+                let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.contentView = hosting
+                hosting.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+                window.displayIfNeeded()
+                if let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) {
+                    hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(path)-sheet.png"))
+                    print("wrote \(path)-sheet.png")
+                }
+                exit(0)
             }
 
         case .licenseLiveCheck(let server, let key):
@@ -686,6 +747,16 @@ struct MurmurMain {
                 print("names: \(context.names.count) — e.g. \(context.names.prefix(8).map(\.stem).joined(separator: ", "))")
             } else {
                 print("not a coding field (\(Int(Date().timeIntervalSince(started) * 1000)) ms)")
+            }
+            exit(0)
+
+        case .whisperPrompt:
+            // The sentence whisper.cpp is told before it listens, as built from the words on this Mac right now —
+            // in an ordinary app and in a coding one.
+            for developer in [false, true] {
+                let terms = LearnedStore.biasTerms(includeDeveloperVocabulary: developer)
+                let prompt = WhisperPrompt.text(for: terms, personal: LearnedStore.personalTermKeys()) ?? "(none)"
+                print("\(developer ? "coding app" : "ordinary app") (\(prompt.count) characters): \(prompt)")
             }
             exit(0)
 
@@ -1336,6 +1407,163 @@ struct MurmurMain {
             }
             exit(0)
 
+        case .renderSheets(let path):
+            // The dictionary import sheet (with a pasted list) and the report sheet (opened from a dictation), drawn
+            // into <path>-import.png and <path>-report.png in a never-shown window.
+            NSApplication.shared.setActivationPolicy(.accessory)
+            do {
+                FontLoader.registerManrope()
+                func draw<V: View>(_ view: V, size: CGSize, to out: String) async {
+                    let host = NSHostingView(rootView: view.frame(width: size.width, height: size.height))
+                    host.frame = NSRect(origin: .zero, size: size)
+                    host.appearance = NSAppearance(named: .aqua)
+                    let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                    window.appearance = NSAppearance(named: .aqua)
+                    window.contentView = host
+                    host.layoutSubtreeIfNeeded()
+                    let until = Date().addingTimeInterval(0.6)
+                    while Date() < until { try? await Task.sleep(for: .milliseconds(50)) }
+                    window.displayIfNeeded()
+                    if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                        host.cacheDisplay(in: host.bounds, to: rep)
+                        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
+                        print("wrote \(out)")
+                    }
+                }
+                let h = SheetMetrics.height(fitting: 600)
+                await draw(DictionaryImportSheet(existing: [:], onDone: { _ in },
+                                                 previewText: "Planrify, Manrope, Ember\nsuper base → Supabase\nWispr Flow\nDeep Pine"),
+                           size: CGSize(width: SheetMetrics.width, height: h), to: path + "-import.png")
+                await draw(SupportReportSheet(onDone: {}, height: 560,
+                                              dictation: SupportReport.DictationContext(
+                                                pasted: "Yeah, the last fix is not working. So now I have dictated and fixed in Claude Code and Codex.",
+                                                heard: nil)),
+                           size: CGSize(width: SheetMetrics.width, height: 560), to: path + "-report.png")
+                exit(0)
+            }
+
+        case .renderToast(let path):
+            // The "Saved … Undo" card drawn into an image: <path>-saved.png, <path>-taken-back.png, <path>-several.png.
+            NSApplication.shared.setActivationPolicy(.accessory)
+            do {
+                FontLoader.registerManrope()
+                func draw(_ model: CorrectionToastModel, to out: String) {
+                    let size = CorrectionToastController.size
+                    let host = NSHostingView(rootView: CorrectionToastView(model: model, onUndo: {})
+                        .frame(width: size.width, height: size.height + 40, alignment: .bottom)
+                        .background(Palette.homeGradient))
+                    host.frame = NSRect(origin: .zero, size: NSSize(width: size.width, height: size.height + 40))
+                    host.appearance = NSAppearance(named: .darkAqua)
+                    let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                    window.contentView = host
+                    host.layoutSubtreeIfNeeded()
+                    window.displayIfNeeded()
+                    if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                        host.cacheDisplay(in: host.bounds, to: rep)
+                        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: out))
+                        print("wrote \(out)")
+                    }
+                }
+                let model = CorrectionToastModel()
+                model.title = "Saved “Manrope”"
+                model.detail = "Instead of “Manrog”, from now on."
+                model.visible = true
+                model.progress = 0.62
+                draw(model, to: path + "-saved.png")
+                model.title = "Saved “Planrify” and 2 more"
+                model.detail = "From now on, instead of what was heard."
+                draw(model, to: path + "-several.png")
+                model.undone = true
+                draw(model, to: path + "-taken-back.png")
+                exit(0)
+            }
+
+        case .duckCheck:
+            // What lowering other sound would do on this Mac now, then a real 2-second duck and restore.
+            print(AudioDuck.describe())
+            AudioDuck.shared.begin()
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            print("during: " + AudioDuck.describe())
+            try? await Task.sleep(nanoseconds: 1_700_000_000)
+            AudioDuck.shared.end()
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            print("after: " + AudioDuck.describe())
+            exit(0)
+
+        case .micCompare(let seconds, let dir):
+            // The Mac's own microphone and a Bluetooth headset recording the same speech at once, for comparing how
+            // fast each starts and how well each is transcribed. Writes builtin.caf and bluetooth.caf into `dir`.
+            let builtIn = AudioRecorder()
+            builtIn.forcedInput = .builtIn
+            let headset = AudioRecorder()
+            headset.forcedInput = .bluetooth
+            var firstAudio: [String: Int] = [:]
+            let began = Date()
+            headset.onFirstAudio = { firstAudio["bluetooth"] = Int(Date().timeIntervalSince(began) * 1000) }
+            builtIn.onFirstAudio = { firstAudio["builtin"] = Int(Date().timeIntervalSince(began) * 1000) }
+            // MURMUR_COMPARE_ONLY=bluetooth|builtin: one microphone per process (two processes side by side), since the
+            // Mac's microphone delivers nothing in a process that holds AirPods in call mode.
+            let only = ProcessInfo.processInfo.environment["MURMUR_COMPARE_ONLY"]
+            if only != "builtin" {
+                do { try headset.start() } catch { print("bluetooth start failed: \(error)") }
+                print("bluetooth start() returned after \(Int(Date().timeIntervalSince(began) * 1000)) ms, input: \(AudioRecorder.transportName(headset.inputTransport))")
+            }
+            if only != "bluetooth" {
+                do { try builtIn.start() } catch { print("built-in start failed: \(error)") }
+            }
+            print("RECORDING \(Int(seconds)) s — speak now")
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            let urls = (bluetooth: headset.stop(), builtin: builtIn.stop())
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            for (name, url, recorder) in [("bluetooth", urls.bluetooth, headset), ("builtin", urls.builtin, builtIn)] {
+                let rate = recorder.capturedFormat?.sampleRate ?? 0
+                print("\(name): \(AudioRecorder.transportName(recorder.inputTransport)), \(Int(rate)) Hz, "
+                      + "\(rate > 0 ? String(format: "%.1f", Double(recorder.capturedFrames) / rate) : "-") s, "
+                      + "first buffer \(recorder.lastStartup.firstBuffer.map { "\($0) ms" } ?? "-"), "
+                      + "first real audio \(firstAudio[name].map { "\($0) ms" } ?? "-"), "
+                      + "first sound \(recorder.lastStartup.firstSound.map { "\($0) ms" } ?? "-"), "
+                      + "restarts \(recorder.restartsThisRecording)")
+                if let url {
+                    let out = URL(fileURLWithPath: dir).appendingPathComponent("\(name).caf")
+                    try? FileManager.default.removeItem(at: out)
+                    try? FileManager.default.moveItem(at: url, to: out)
+                }
+            }
+            exit(0)
+
+        case .editRecords:
+            // The local record of edits, in words: what needed a fix, how often, and where it first went wrong.
+            print(EditRecordStore.summary(of: EditRecordStore.load()))
+            exit(0)
+
+        case .renderShell(let path):
+            // The main window (Home) drawn into an image in a never-shown window (no focus change, no keys, no pointer).
+            // MURMUR_RENDER_RAIL_PEEK=1 pictures the collapsed rail as it is while hovered open.
+            NSApplication.shared.setActivationPolicy(.accessory)
+            do {
+                FontLoader.registerManrope()
+                let size = CGSize(width: 1180, height: 840)
+                let app = AppDelegate()
+                app.micAuthorized = true
+                app.axTrusted = true
+                let hosting = NSHostingView(rootView: AppShellRoot(app: app).frame(width: size.width, height: size.height))
+                hosting.frame = NSRect(origin: .zero, size: size)
+                let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                // The app is pinned to light; a window that is never shown would otherwise take the system's appearance.
+                window.appearance = NSAppearance(named: .aqua)
+                window.contentView = hosting
+                hosting.layoutSubtreeIfNeeded()
+                let until = Date().addingTimeInterval(1.0)
+                while Date() < until { try? await Task.sleep(for: .milliseconds(100)) }
+                window.displayIfNeeded()
+                if let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) {
+                    hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                    print("wrote \(path)")
+                }
+                exit(0)
+            }
+
         case .renderSettings(let path):
             // Settings ▸ Dictation drawn into an image in a never-shown window (no focus change, no keys); the last tab
             // the user had open is put back afterwards.
@@ -1516,11 +1744,18 @@ struct MurmurMain {
         case renderTemplateSheet(String)
         case renderSnippets(String)
         case renderSettings(String)
+        case renderShell(String)
+        case editRecords
+        case duckCheck
+        case micCompare(Double, String)
+        case renderToast(String)
+        case renderSheets(String)
         case format(String)
         case transform(String)
         case spokenCommand(String)
         case gemmaEdit(String)
         case layout(String)
+        case whisperPrompt
         case code(String)
         case translate(String)
         case translateDownload(TranslationModel)
@@ -1541,6 +1776,8 @@ struct MurmurMain {
         case licenseVerify(String)
         case licenseUICheck(String)
         case licenseLiveCheck(String, String)
+        case supportCheck(String, String)
+        case renderSupport(String)
         case vad(String)
         case benchText(String)
         case editBench(String)

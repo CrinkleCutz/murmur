@@ -574,6 +574,8 @@ struct PulsingDot: View {
     var active: Bool = true
 
     @State private var expanded = false
+    /// Paused while Murmur isn't the app in front (see `HeroCaptureWaveform`): the ring rests at its starting size.
+    @Environment(\.controlActiveState) private var windowState
 
     var body: some View {
         ZStack {
@@ -590,11 +592,12 @@ struct PulsingDot: View {
         .frame(width: size, height: size)
         .onAppear { startPulse() }
         .onChange(of: active) { _, _ in startPulse() }
+        .onChange(of: windowState) { _, _ in startPulse() }
     }
 
     private func startPulse() {
         expanded = false
-        guard active else { return }
+        guard active, windowState != .inactive else { return }
         withAnimation(.easeOut(duration: 1.3).repeatForever(autoreverses: false)) {
             expanded = true
         }
@@ -625,6 +628,9 @@ struct CaptureWaveform: View {
     var color: Color = .white
 
     @State private var tall = false
+    /// Paused while Murmur isn't the app in front (see `HeroCaptureWaveform`).
+    @Environment(\.controlActiveState) private var windowState
+    private var running: Bool { active && windowState != .inactive }
 
     private static let heights: [CGFloat] = [16, 28, 42, 57, 38, 68, 47, 31]
     private static let delays: [Double] = [0, 0.10, 0.25, 0.40, 0.55, 0.70, 0.85, 1.0]
@@ -659,8 +665,8 @@ struct CaptureWaveform: View {
             }
         }
         .frame(height: 76)
-        .onAppear { tall = active }
-        .onChange(of: active) { _, isActive in tall = isActive }
+        .onAppear { tall = running }
+        .onChange(of: running) { _, isRunning in tall = isRunning }
     }
 }
 

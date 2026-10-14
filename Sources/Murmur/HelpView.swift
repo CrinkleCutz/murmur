@@ -18,8 +18,9 @@ struct HelpPage: View {
     @State private var query = ""
     @FocusState private var searchFocused: Bool
 
-    /// Where "Report a problem" goes — one place, so it's easy to point elsewhere.
-    static let reportProblemURL = URL(string: "https://www.murmurmac.com/support")!
+    /// "Report a problem" opens the in-app sheet (`SupportReportSheet`), which sends to the website's /api/support.
+    static let reportProblem = HelpDestination.report("Report a problem")
+    @State private var reporting = false
 
     private var currentTab: HelpTab { HelpTab(rawValue: storedTab) ?? .basics }
     private var trimmedQuery: String { query.trimmingCharacters(in: .whitespaces) }
@@ -53,6 +54,7 @@ struct HelpPage: View {
                 }
             }
         }
+        .sheet(isPresented: $reporting) { SupportReportSheet { reporting = false } }
     }
 
     // MARK: Header and search
@@ -142,7 +144,7 @@ struct HelpPage: View {
                     HelpRow(item: HelpItem(
                                 title: "Try another word",
                                 body: "Or tell us what you were looking for — we'll add the answer.",
-                                destination: .url("Report a problem", Self.reportProblemURL)),
+                                destination: Self.reportProblem),
                             isLast: true, open: open)
                 } else {
                     ForEach(Array(matches.enumerated()), id: \.offset) { index, match in
@@ -172,6 +174,8 @@ struct HelpPage: View {
             // Settings reads its remembered tab on appear, so this lands on the right one.
             UserDefaults.standard.set(tab.rawValue, forKey: "settingsTab")
             page = .settings
+        case .report:
+            reporting = true
         case .url(_, let url):
             NSWorkspace.shared.open(url)
         case .folder(_, let url):
@@ -406,7 +410,7 @@ struct HelpPage: View {
             HelpSection(title: "STILL STUCK?", items: [
                 HelpItem(title: "Tell us what happened",
                          body: "Say what you did and what you expected, and we'll look into it.",
-                         destination: .url("Report a problem", Self.reportProblemURL)),
+                         destination: Self.reportProblem),
             ]),
         ]
     }
@@ -483,10 +487,12 @@ enum HelpDestination {
     case settings(String, SettingsTab)
     case url(String, URL)
     case folder(String, URL)
+    /// The in-app "Report a problem" sheet.
+    case report(String)
 
     var title: String {
         switch self {
-        case .page(let title, _), .settings(let title, _), .url(let title, _), .folder(let title, _): title
+        case .page(let title, _), .settings(let title, _), .url(let title, _), .folder(let title, _), .report(let title): title
         }
     }
 
@@ -494,7 +500,7 @@ enum HelpDestination {
     var isExternal: Bool {
         switch self {
         case .url, .folder: true
-        case .page, .settings: false
+        case .page, .settings, .report: false
         }
     }
 }
