@@ -50,6 +50,13 @@ CONFIGS = {  # name: (bundle id, engine args, extra environment)
  "pk-claude-nonamefix": (CLAUDE, ["--engine", "parakeet", "--whisper-model", "v2"], {"MURMUR_NAMEFIX": "0"}),
  # transcribe while you talk (--chunked replays the recording through the live LiveChunkSession)
  "wcpp-claude-chunked":  (CLAUDE, WCPP + ["--chunked"], {}),
+ # 2026-10-15: past the prompt limit — old prompt order as the baseline, then each new piece on its own
+ "wcpp-claude-oldprompt": (CLAUDE, WCPP, {"MURMUR_PROMPT_RANK": "0", "MURMUR_NAMEFIX_AUDIO": "0", "MURMUR_BOOST": "0"}),
+ "wcpp-claude-rank":      (CLAUDE, WCPP, {"MURMUR_NAMEFIX_AUDIO": "0", "MURMUR_BOOST": "0"}),
+ "wcpp-claude-audio":     (CLAUDE, WCPP, {"MURMUR_PROMPT_RANK": "0", "MURMUR_NAMEFIX_AUDIO": "1", "MURMUR_BOOST": "0"}),
+ "wcpp-claude-boost":     (CLAUDE, WCPP, {"MURMUR_PROMPT_RANK": "0", "MURMUR_NAMEFIX_AUDIO": "0", "MURMUR_BOOST": "1"}),
+ "wcpp-claude-boost13":   (CLAUDE, WCPP, {"MURMUR_PROMPT_RANK": "0", "MURMUR_NAMEFIX_AUDIO": "0", "MURMUR_BOOST": "1", "MURMUR_BOOST_START": "1", "MURMUR_BOOST_CONT": "3"}),
+ "wcpp-claude-boost24":   (CLAUDE, WCPP, {"MURMUR_PROMPT_RANK": "0", "MURMUR_NAMEFIX_AUDIO": "0", "MURMUR_BOOST": "1", "MURMUR_BOOST_START": "2", "MURMUR_BOOST_CONT": "4"}),
  "wcpp-claude-chunked8": (CLAUDE, WCPP + ["--chunked"], {"MURMUR_CHUNK_MIN": "8"}),   # more cuts, to stress the seams
 }
 TERMS = ["Stripe", "Wispr Flow", "superwhisper", "GitHub", "Newsreader", "Manrope", "Mac", "Claude Code", "Supabase", "Vercel",

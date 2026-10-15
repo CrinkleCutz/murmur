@@ -31,8 +31,11 @@ enum WhisperPrompt {
     /// `terms` in the order the caller has them; `personal` (lowercased) are the user's own, which go first.
     /// Every word the user taught is included, everyday or not — their choice (2026-09-29): what they taught should
     /// reach the engine. Only Murmur's own built-in list is held to names and unusual words.
+    /// `relevance`: which words win the places when they don't all fit (`TermUsage`) — the user's own still before
+    /// Murmur's built-in ones, and the sentence keeps them in their usual order.
     static func text(for terms: [String], personal: Set<String>,
-                     isKnownWord: (String) -> Bool = HarperChecker.isKnownEnglishWord) -> String? {
+                     isKnownWord: (String) -> Bool = HarperChecker.isKnownEnglishWord,
+                     relevance: ((String) -> Double)? = nil) -> String? {
         var seen = Set<String>()
         var candidates: [(term: String, isPersonal: Bool)] = []
         for raw in terms {
@@ -47,11 +50,29 @@ enum WhisperPrompt {
         let ordered = candidates.filter(\.isPersonal) + candidates.filter { !$0.isPersonal }
         var chosen: [String] = []
         var length = 0
-        for candidate in ordered {
-            let added = candidate.term.count + 2
-            if length + added > characterBudget { break }
-            chosen.append(candidate.term)
-            length += added
+        if let relevance {
+            // The most relevant first for the places, each group keeping its usual order otherwise; then the chosen
+            // words written in the usual order, so only which words are in changes, not where they sit.
+            let ranked = ordered.enumerated().sorted { a, b in
+                if a.element.isPersonal != b.element.isPersonal { return a.element.isPersonal }
+                let (ra, rb) = (relevance(a.element.term), relevance(b.element.term))
+                return ra != rb ? ra > rb : a.offset < b.offset
+            }
+            var picked = Set<Int>()
+            for (index, candidate) in ranked {
+                let added = candidate.term.count + 2
+                if length + added > characterBudget { continue }
+                picked.insert(index)
+                length += added
+            }
+            chosen = ordered.enumerated().filter { picked.contains($0.offset) }.map(\.element.term)
+        } else {
+            for candidate in ordered {
+                let added = candidate.term.count + 2
+                if length + added > characterBudget { break }
+                chosen.append(candidate.term)
+                length += added
+            }
         }
         guard let last = chosen.last else { return nil }
         let list = chosen.count == 1 ? last : chosen.dropLast().joined(separator: ", ") + " and " + last

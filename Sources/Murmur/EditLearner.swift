@@ -22,6 +22,7 @@ enum EditLearner {
     /// The field a dictation is about to be pasted into.
     struct Target {
         let element: AXUIElement
+        let pid: pid_t
     }
 
     private struct Session {
@@ -37,6 +38,23 @@ enum EditLearner {
         var steady: String?
         /// Where this dictation came from, for `EditRecordStore`.
         var draft: EditRecordDraft?
+        /// The app's process, for `TypingEvidence`.
+        var pid: pid_t = 0
+        /// Each steady reading and when it became steady — so readings from the moment the box was being emptied on
+        /// send can be set aside (`settledBeforeSending`).
+        var steadyHistory: [(at: Date, text: String)] = []
+    }
+
+    /// A box being emptied on send can be read half-cleared ("Evaluate…" read back as "valuate…", 2026-10-15) — and
+    /// twice alike, so it looks steady. Readings from the last `sendSettle` seconds before the box emptied or the
+    /// dictation left it are set aside: what counts is the last reading from before that, or none.
+    static let sendSettle: TimeInterval = 0.6
+
+    private static func settledBeforeSending(_ watched: inout Session) {
+        let cutoff = Date().addingTimeInterval(-sendSettle)
+        let earlier = watched.steadyHistory.last { $0.at <= cutoff }?.text
+        watched.steady = earlier
+        watched.latest = earlier ?? watched.inserted
     }
 
     static var isEnabled: Bool { UserDefaults.standard.object(forKey: "learnFromEdits") as? Bool ?? true }
@@ -63,7 +81,7 @@ enum EditLearner {
         var pid: pid_t = 0
         guard AXUIElementGetPid(element, &pid) == .success, pid != ProcessInfo.processInfo.processIdentifier
         else { return nil }
-        return Target(element: element)
+        return Target(element: element, pid: pid)
     }
 
     /// The paste landed: whatever an earlier dictation's field shows now is final, and this one is watched.
@@ -76,7 +94,8 @@ enum EditLearner {
             for delay in [0.15, 0.6] {
                 queue.asyncAfter(deadline: .now() + delay) {
                     guard current == generation, session == nil else { return }
-                    begin(target.element, inserted: inserted, draft: draft, generation: current, lastTry: delay == 0.6)
+                    begin(target.element, pid: target.pid, inserted: inserted, draft: draft, generation: current,
+                          lastTry: delay == 0.6)
                 }
             }
         }
@@ -89,8 +108,8 @@ enum EditLearner {
 
     // MARK: - Watching
 
-    private static func begin(_ element: AXUIElement, inserted: String, draft: EditRecordDraft?, generation current: Int,
-                              lastTry: Bool) {
+    private static func begin(_ element: AXUIElement, pid: pid_t, inserted: String, draft: EditRecordDraft?,
+                              generation current: Int, lastTry: Bool) {
         AXUIElementSetMessagingTimeout(element, 0.2)
         guard let field = text(of: element), let caret = caretEnd(of: element),
               let range = pastedRange(of: inserted, in: field, caret: caret) else {
@@ -106,7 +125,7 @@ enum EditLearner {
             for: NSRange(location: afterStart, length: min(16, ns.length - afterStart))))
         let landed = ns.substring(with: range)
         session = Session(element: element, inserted: landed, before: before, after: after, started: Date(),
-                          latest: landed, steady: landed, draft: draft)
+                          latest: landed, steady: landed, draft: draft, pid: pid, steadyHistory: [(Date(), landed)])
         dictationLog.notice("edit learning: watching the field")
         schedulePoll(generation: current, fieldLength: ns.length)
     }
@@ -131,6 +150,8 @@ enum EditLearner {
                 return
             }
             guard !field.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                settledBeforeSending(&watched)
+                session = watched
                 finish(readAgain: false, reason: "the field was emptied (sent or deleted)")
                 return
             }
@@ -141,10 +162,15 @@ enum EditLearner {
                 return
             }
             guard stillHolds(watched.inserted, in: region) else {
+                settledBeforeSending(&watched)
+                session = watched
                 finish(readAgain: false, reason: "the dictation left the field (sent or deleted)")
                 return
             }
-            if region == watched.latest { watched.steady = region }
+            if region == watched.latest, watched.steady != region {
+                watched.steady = region
+                watched.steadyHistory.append((Date(), region))
+            }
             watched.latest = region
             session = watched
             schedulePoll(generation: current, fieldLength: (field as NSString).length)
@@ -165,6 +191,13 @@ enum EditLearner {
         }
         dictationLog.notice("edit learning: stopped watching — \(reason, privacy: .public)")
         guard let steady = watched.steady else { return }
+        // No typing in that app since the paste: whatever changed in the box wasn't the user correcting it.
+        let typed = TypingEvidence.count(pid: watched.pid, since: watched.started)
+        if typed == 0, steady != watched.inserted {
+            dictationLog.notice("edit learning: the box changed but nothing was typed — not learned")
+            if let draft = watched.draft { EditRecordStore.complete(draft, final: steady, reason: reason + ", no typing", learned: 0) }
+            return
+        }
         // Only the corrections Murmur now makes by itself are announced (a heard everyday word only teaches the name).
         var learned: [LearnedNotice] = agreedPairs(original: watched.inserted, steady: steady, latest: watched.latest)
             .compactMap { pair in

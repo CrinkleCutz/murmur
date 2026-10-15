@@ -294,6 +294,8 @@ struct MurmurMain {
             let dictionaryImportPassed = DictionaryImport.runSelfTest()
             let pasteLastPassed = PasteLastShortcut.runSelfTest()
             let commonWordsPassed = CommonWords.runSelfTest()
+            let typingPassed = TypingEvidence.runSelfTest()
+            let termUsagePassed = TermUsage.runSelfTest()
             let screenNamesPassed = ScreenContext.runSelfTest()
             let transformGuardPassed = TransformGuard.runSelfTest()
             let destinationPassed = DestinationDetector.runSelfTest()
@@ -310,7 +312,7 @@ struct MurmurMain {
                  && profilesPassed && audioPassed && hallucinationPassed
                  && developerVocabPassed && transformsPassed && plausibilityPassed
                  && harperPassed && guardPassed && trimmerPassed && correctionsPassed && timesPassed && matchAppPassed && shortcutKeysPassed && healthPassed && pastePassed
-                 && secureInputPassed && styleGuardPassed && notchPassed && navBarPassed && licenseTokenPassed && licenseGatePassed && licenseStorePassed && updateSelectionPassed && licenseTilePassed && licensePreviewPassed && whisperPromptPassed && liveChunksPassed && microphonePassed && unsureWordsPassed && cursorPassed && editLearnerPassed && sentLearnerPassed && editRecordsPassed && dictionaryImportPassed && pasteLastPassed && commonWordsPassed && screenNamesPassed && transformGuardPassed && destinationPassed && templateLayoutPassed && rewritePromptPassed && snippetsPassed && cleanupLanguagesPassed && spokenCommandsPassed && spokenCodePassed && projectNamesPassed && codeFieldsPassed && translatePassed ? 0 : 1)
+                 && secureInputPassed && styleGuardPassed && notchPassed && navBarPassed && licenseTokenPassed && licenseGatePassed && licenseStorePassed && updateSelectionPassed && licenseTilePassed && licensePreviewPassed && whisperPromptPassed && liveChunksPassed && microphonePassed && unsureWordsPassed && cursorPassed && editLearnerPassed && sentLearnerPassed && editRecordsPassed && dictionaryImportPassed && pasteLastPassed && commonWordsPassed && typingPassed && termUsagePassed && screenNamesPassed && transformGuardPassed && destinationPassed && templateLayoutPassed && rewritePromptPassed && snippetsPassed && cleanupLanguagesPassed && spokenCommandsPassed && spokenCodePassed && projectNamesPassed && codeFieldsPassed && translatePassed ? 0 : 1)
 
         case .pipelineBench(let path):
             // Recognizer decode + cleanup call, with and without starting the cleanup prompt's fixed prefix at the

@@ -344,6 +344,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             self.startSoundWaitsForHeadset = false
             if self.uiState == .recording { SoundEffect.play("Pop") }
         }
+        // Edit learning only trusts a changed box when the user typed in it — see `TypingEvidence`.
+        TypingEvidence.start()
         // ⌃⌥V pastes the last dictation again, wherever the cursor is.
         pasteLastShortcut.onTrigger = { [weak self] in self?.pasteLastDictation() }
         pasteLastShortcut.start()

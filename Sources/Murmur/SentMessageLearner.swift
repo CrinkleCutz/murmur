@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Learning from corrections in an app whose text box Murmur can't read (Codex's composer shows no text to other apps).
@@ -16,6 +17,7 @@ enum SentMessageLearner {
         let text: String
         let date: Date
         let draft: EditRecordDraft?
+        let pid: pid_t
     }
 
     private static let queue = DispatchQueue(label: "local.murmur.sent-learner", qos: .utility)
@@ -36,8 +38,9 @@ enum SentMessageLearner {
         guard isEnabled, bundleID == codexBundleID || !fieldWasReadable else { return }
         let text = inserted.trimmingCharacters(in: .whitespacesAndNewlines)
         guard words(in: text).count >= 3 else { return }
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
         queue.async {
-            pending.append(Pending(text: text, date: Date(), draft: draft))
+            pending.append(Pending(text: text, date: Date(), draft: draft, pid: pid))
             if pending.count > 20 { pending.removeFirst(pending.count - 20) }
             schedule()
         }
@@ -73,6 +76,11 @@ enum SentMessageLearner {
             guard let message = messages.first(where: { $0.date >= item.date && region(of: item.text, in: $0.text) != nil }),
                   let found = region(of: item.text, in: message.text) else { continue }
             pending.removeAll { $0.date == item.date && $0.text == item.text }
+            // Nothing typed in that app between the paste and the message: the user changed nothing (`TypingEvidence`).
+            guard TypingEvidence.count(pid: item.pid, since: item.date, until: message.date) > 0 else {
+                dictationLog.notice("sent-message learning: found the message, nothing was typed — not learned")
+                continue
+            }
             var notices: [LearnedNotice] = EditLearner.pairs(original: item.text, edited: found).compactMap { pair in
                 LearnedStore.addTracked(heard: pair.heard, intended: pair.intended)
                     .map { LearnedNotice(heard: pair.heard, intended: pair.intended, receipt: $0) }

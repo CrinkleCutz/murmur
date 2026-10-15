@@ -199,6 +199,12 @@ enum LearnedStore {
         for run in substitutions(original: original, corrected: corrected) {
             for raw in run.added {
                 let word = raw.trimmingCharacters(in: .punctuationCharacters)
+                // Only a word that looks nothing like what it replaced. A look-alike fix ("Manrop" → "Manrope") is the
+                // regular correction path's job, and a clipped reading of the same word ("Evaluate" read back as
+                // "valuate" while the box was being cleared on send, 2026-10-15) is no new word at all.
+                if run.removed.contains(where: {
+                    spellingSimilarity($0.trimmingCharacters(in: .punctuationCharacters), word) >= minimumLearnedSimilarity
+                }) { continue }
                 let letters = word.filter(\.isLetter)
                 guard letters.count >= 4, word.allSatisfy({ $0.isLetter || $0 == "-" || $0 == "'" || $0 == "’" }),
                       // Unknown to the dictionary, or known but rare ("agentic"): either way worth telling the recogniser.
@@ -865,6 +871,9 @@ enum LearnedStore {
         check(newUnusualWords(original: murmurText, corrected: otherAppAppended, known: [], isKnownWord: ordinary,
                               isCommon: everydayWords).isEmpty,
               "another app's version pasted after the dictation teaches no new words")
+        check(newUnusualWords(original: "Evaluate the learned words", corrected: "valuate the learned words", known: [],
+                              isKnownWord: { _ in false }, isCommon: { _ in false }).isEmpty,
+              "a clipped reading of the same word is not a new word")
         // Undo takes back exactly what one edit saved (pure: nothing here touches the user's own file).
         var data = LearnedData(corrections: [LearnedCorrection(heard: "Mormo", intended: "Murmur")], terms: ["Murmur"])
         let first = record(heard: "Plondrify", intended: "Planrify", in: &data)

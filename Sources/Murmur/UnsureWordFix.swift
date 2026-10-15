@@ -71,6 +71,12 @@ enum UnsureWordFix {
         guard let replacements = replacements(
             in: words, terms: terms, screenNames: screenNames, ownWords: ownWords, isKnownWord: isKnownWord)
         else { return nil }
+        return apply(replacements, to: text)
+    }
+
+    /// `replacements` made in `text`, in order, each only once; nil when none could be made.
+    static func apply(_ replacements: [(words: [String], with: String)], to text: String)
+        -> (text: String, changes: [(heard: String, name: String)])? {
         var result = text
         var searchFrom = result.startIndex
         var changes: [(heard: String, name: String)] = []
@@ -105,9 +111,11 @@ enum UnsureWordFix {
         similarity >= 0.72 || (spanKey == nameKey && spanKey.count >= 2)
     }
 
+    /// `loose`: looser spelling and sound thresholds, for proposals that `AudioRescore` checks against the audio before
+    /// any is used — never applied on their own.
     static func replacements(
         in words: [Word], terms: [String], screenNames: [String] = [], ownWords: Set<String>? = nil,
-        isKnownWord: (String) -> Bool
+        isKnownWord: (String) -> Bool, loose: Bool = false
     ) -> [(words: [String], with: String)]? {
         func candidate(_ term: String, fromScreen: Bool)
             -> (term: String, letters: String, key: String, words: Int, fromScreen: Bool, builtIn: Bool) {
@@ -155,14 +163,14 @@ enum UnsureWordFix {
                     // And a stretch of several words that includes an ordinary one ("up Whisperflow", where the
                     // recognizer ran the name together) must be spelled almost exactly like the name.
                     var accepted = candidate.words == length && !(length > 1 && known.contains(true))
-                        ? similarity >= 0.72 || (soundsAlike && similarity >= 0.4)
-                        : similarity >= 0.85
-                    if allKnown && similarity < 0.9 { accepted = false }
+                        ? similarity >= (loose ? 0.5 : 0.72) || (soundsAlike && similarity >= (loose ? 0.25 : 0.4))
+                        : similarity >= (loose ? 0.7 : 0.85)
+                    if allKnown && similarity < (loose ? 0.75 : 0.9) { accepted = false }
                     if candidate.fromScreen,
                        !screenNameAllowed(similarity: similarity, spanKey: spanKey, nameKey: candidate.key) {
                         accepted = false
                     }
-                    if candidate.builtIn,
+                    if candidate.builtIn, !loose,
                        !builtInTermAllowed(similarity: similarity, spanKey: spanKey, nameKey: candidate.key) {
                         accepted = false
                     }

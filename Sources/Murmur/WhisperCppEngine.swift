@@ -191,7 +191,13 @@ final class WhisperCppEngine {
         // Names and unusual words only, the user's own first, one plain sentence, short enough never to be cut —
         // see `WhisperPrompt` for what the old 150-term "Vocabulary:" list did to punctuation and accuracy.
         // A shell gets an example of commands instead (`WhisperPrompt.shell`), so it writes `git rebase -i HEAD~3`.
-        var prompt = promptOverride ?? WhisperPrompt.text(for: biasTerms, personal: LearnedStore.personalTermKeys())
+        // Which words win the places when they don't all fit — see `TermUsage`. `MURMUR_PROMPT_RANK=0` for the old order.
+        let ranked = ProcessInfo.processInfo.environment["MURMUR_PROMPT_RANK"] != "0"
+            && (UserDefaults.standard.object(forKey: "promptByUse") as? Bool ?? true)
+        let relevance = ranked ? TermUsage.relevance(
+            for: biasTerms, screen: ScreenContext.current, recentlyLearned: LearnedStore.load().terms.suffix(5).map { $0 }) : nil
+        var prompt = promptOverride ?? WhisperPrompt.text(
+            for: biasTerms, personal: LearnedStore.personalTermKeys(), relevance: relevance)
         // Debug only, for comparing prompts on the same audio from the command line: "none" for no prompt.
         if let override = ProcessInfo.processInfo.environment["MURMUR_WHISPERCPP_PROMPT"] {
             prompt = override == "none" ? nil : override
@@ -206,16 +212,21 @@ final class WhisperCppEngine {
         defer { if reportsStatus { onStatus?(nil) } }
 
         let previous = decodeInFlight
-        let decode = Task.detached(priority: .userInitiated) { () throws -> (text: String, confidence: Float?, words: [UnsureWordFix.Word]) in
+        let decode = Task.detached(priority: .userInitiated) { () throws -> Decoded in
             await previous?.value
-            return try Self.runFull(ctx: ctx, samples: samples, language: language, prompt: prompt)
+            return try Self.runFull(ctx: ctx, samples: samples, language: language, prompt: prompt, terms: biasTerms)
         }
         decodeInFlight = Task { _ = try? await decode.value }
         let started = Date()
         let decoded = try await decode.value
         var result = (text: decoded.text, confidence: decoded.confidence)
-        // A name the model was unsure of, checked against the user's names — see `UnsureWordFix`.
-        if UnsureWordFix.isEnabled, language == "en",
+        if let changes = decoded.audioChanges, !changes.isEmpty {
+            dictationLog.info("whisper.cpp: fixed \(changes.count) unsure name(s), checked against the audio")
+            NameFixLog.record(changes, engine: "whisper.cpp")
+        }
+        // A name the model was unsure of, checked against the user's names — see `UnsureWordFix`. Already done, with
+        // the audio as the judge, when `AudioRescore` ran.
+        if UnsureWordFix.isEnabled, language == "en", decoded.audioChanges == nil,
            let fixed = UnsureWordFix.fix(decoded.text, words: decoded.words, terms: biasTerms) {
             dictationLog.info("whisper.cpp: fixed \(fixed.changes.count) unsure name(s)")
             NameFixLog.record(fixed.changes, engine: "whisper.cpp")
@@ -239,9 +250,17 @@ final class WhisperCppEngine {
     /// The actual `whisper_full` call. Split out from `transcribe` so the
     /// `const char *` lifetimes (`language`, `initial_prompt`) stay scoped to
     /// `withCString`, rather than managed by hand with `strdup`/`free`.
+    /// One decode's result. `audioChanges` is non-nil when `AudioRescore` judged the name fix (possibly with no change).
+    struct Decoded {
+        var text: String
+        var confidence: Float?
+        var words: [UnsureWordFix.Word]
+        var audioChanges: [(heard: String, name: String)]?
+    }
+
     nonisolated private static func runFull(
-        ctx: OpaquePointer, samples: [Float], language: String, prompt: String?
-    ) throws -> (text: String, confidence: Float?, words: [UnsureWordFix.Word]) {
+        ctx: OpaquePointer, samples: [Float], language: String, prompt: String?, terms: [String] = []
+    ) throws -> Decoded {
         try language.withCString { languagePtr in
             try withOptionalCString(prompt) { promptPtr in
                 // Debug only, for comparing decoding strategies on the same audio from the command line: a beam
@@ -273,9 +292,17 @@ final class WhisperCppEngine {
                 params.print_realtime = false
                 params.print_timestamps = false
 
+                // The user's words get a bonus once Whisper has started one — see `VocabularyBoost`.
+                let boost = VocabularyBoost.isEnabled && language == "en" && !terms.isEmpty
+                    ? VocabularyBoost(ctx: ctx, terms: terms) : nil
+                if let boost, !boost.isEmpty {
+                    params.logits_filter_callback = vocabularyBoostCallback
+                    params.logits_filter_callback_user_data = Unmanaged.passUnretained(boost).toOpaque()
+                }
                 let status = samples.withUnsafeBufferPointer { buffer in
                     whisper_full(ctx, params, buffer.baseAddress, Int32(buffer.count))
                 }
+                withExtendedLifetime(boost) {}
                 guard status == 0 else { throw WhisperCppError.transcribeFailed }
 
                 // No per-segment no_speech_prob filter here — it used to
@@ -340,8 +367,18 @@ final class WhisperCppEngine {
                 }
                 let confidence: Float? = tokenCount == 0
                     ? nil : Float(exp(logProbSum / Double(tokenCount)))
-                return (text.trimmingCharacters(in: .whitespacesAndNewlines), confidence,
-                        UnsureWordFix.words(fromTokens: tokens))
+                let finalText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let words = UnsureWordFix.words(fromTokens: tokens)
+                // The name fix judged by the audio while this decode's audio is still loaded — one 30-second window
+                // only (a longer recording keeps just its last window), English only, like the name fix itself.
+                if AudioRescore.isEnabled, UnsureWordFix.isEnabled, language == "en", !terms.isEmpty,
+                   samples.count <= 30 * 16000, !finalText.isEmpty {
+                    let fixed = AudioRescore.fix(ctx: ctx, language: language, prompt: prompt, text: finalText,
+                                                 words: words, terms: terms)
+                    return Decoded(text: fixed?.text ?? finalText, confidence: confidence, words: words,
+                                   audioChanges: fixed?.changes ?? [])
+                }
+                return Decoded(text: finalText, confidence: confidence, words: words, audioChanges: nil)
             }
         }
     }
