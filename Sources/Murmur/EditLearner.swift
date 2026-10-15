@@ -70,6 +70,22 @@ enum EditLearner {
     nonisolated(unsafe) private static var session: Session?
     nonisolated(unsafe) private static var generation = 0
 
+    /// The focused field right before a paste, whether or not learning is on — for checking the paste landed.
+    static func focusedTarget() -> Target? {
+        guard let element = focusedElement() else { return nil }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success else { return nil }
+        return Target(element: element, pid: pid)
+    }
+
+    /// Whether `inserted` is now in that field: true or false when the field can be read, nil when it can't (Codex).
+    static func landed(_ inserted: String, in target: Target) -> Bool? {
+        AXUIElementSetMessagingTimeout(target.element, 0.2)
+        guard let field = text(of: target.element) else { return nil }
+        let wanted = inserted.trimmingCharacters(in: .whitespacesAndNewlines)
+        return wanted.isEmpty || field.contains(wanted)
+    }
+
     /// Right before a paste: the focused field, or nil when there's nothing to watch (a password field, no field).
     static func watchBeforePaste() -> Target? {
         guard isEnabled else { return nil }

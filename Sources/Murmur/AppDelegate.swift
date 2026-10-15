@@ -2144,6 +2144,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                                 : formatted
                             // Where it lands, so a name the user corrects by hand afterwards is learned — see `EditLearner`.
                             let editTarget = EditLearner.watchBeforePaste()
+                            // Where the paste is meant to go, to check it got there.
+                            let pasteTarget = EditLearner.focusedTarget()
                             // What the recognizer wrote and what is pasted, for the local record of edits.
                             let editDraft = EditRecordStore.isEnabled ? EditRecordDraft(
                                 raw: raw, pasted: inserted, app: resolvedBundleID ?? "",
@@ -2162,11 +2164,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                                         inserted: inserted, bundleID: resolvedBundleID, fieldWasReadable: editTarget != nil,
                                         draft: editDraft)
                                 }
-                                // Nothing read the text: the paste didn't happen. Say so rather than let it vanish.
-                                guard outcome == .notObserved, let self else { return }
-                                self.lastError = "The app in front never took the text, so it wasn't pasted. It's in "
-                                    + "History, and in the bar's Copy last dictation."
-                                self.flashHUD(.info("Not pasted — it’s in History", symbol: "clock"), for: 2.6)
+                                // Did it land? Focus can move mid-dictation (another app, or an agent clicking
+                                // elsewhere) and the paste goes nowhere. Unless the text is seen in the box, the
+                                // dictation stays on the clipboard so ⌘V gets it — said out loud when it surely
+                                // missed, quietly when the box just can't be read (Codex).
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                                    guard let self else { return }
+                                    let landed = pasteTarget.flatMap { EditLearner.landed(inserted, in: $0) }
+                                    guard outcome == .notObserved || landed != true else { return }
+                                    Self.copyToClipboardTransiently(formatted)
+                                    if outcome == .notObserved || landed == false || pasteTarget == nil {
+                                        dictationLog.notice("paste: not seen in a text box — left on the clipboard")
+                                        self.lastError = "Your dictation didn't land in a text box, so it's on the clipboard: "
+                                            + "click where it should go and press ⌘V. It's also in History."
+                                        self.flashHUD(.info("Not pasted — press ⌘V to paste", symbol: "doc.on.clipboard"),
+                                                      for: 3.2)
+                                    }
+                                }
                             }
                             flashPasted(translationNote: translationNote)
                         }
