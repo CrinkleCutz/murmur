@@ -296,6 +296,18 @@ struct LegalEntry: Identifiable {
             text: LegalTexts.manropeOFL,
             links: [link("github.com/sharanda/manrope", "https://github.com/sharanda/manrope")]),
         LegalEntry(
+            name: "Fogtwo No5",
+            purpose: "The typeface of Murmur's headline on Home.",
+            license: "SIL OFL 1.1",
+            text: LegalTexts.fogtwoOFL,
+            links: [link("glukfonts.pl", "https://www.glukfonts.pl")]),
+        LegalEntry(
+            name: "wordfreq",
+            purpose: "Which English words are common, so rarer ones you type are learned.",
+            license: "CC BY-SA 4.0",
+            text: LegalTexts.wordfreqNotice,
+            links: [link("github.com/rspeer/wordfreq", "https://github.com/rspeer/wordfreq")]),
+        LegalEntry(
             name: "Phosphor Icons",
             purpose: "Every icon in Murmur.",
             license: "MIT",

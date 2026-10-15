@@ -13,9 +13,9 @@ enum FontLoader {
         "ExtraLight", "Light", "Regular", "Medium", "SemiBold", "Bold", "ExtraBold",
     ]
 
+    /// Manrope's weights, and Fogtwo No5 — the brand's headline face (one style; never given a faux bold).
     static func registerManrope() {
-        for weight in weights {
-            let name = "Manrope-\(weight)"
+        for name in weights.map({ "Manrope-\($0)" }) + ["FogtwoNo5"] {
             // Packaged .app: files live under Contents/Resources/Fonts —
             // Bundle.main resolves that correctly. SwiftPM's Bundle.module
             // accessor instead looks for a `Murmur_Murmur.bundle` at the
@@ -49,6 +49,11 @@ enum ManropeWeight {
 }
 
 extension Font {
+    /// Fogtwo No5, the brand's headline face: Home's hero line. It has one style — size it, never bold it.
+    static func fogtwo(_ size: CGFloat) -> Font {
+        .custom("FogtwoNo5", size: size)
+    }
+
     /// Manrope at the given size/weight. Falls back to the system font
     /// automatically if registration ever fails — `Font.custom` degrades
     /// gracefully rather than crashing on a missing PostScript name.

@@ -11,8 +11,8 @@ struct LearnedCorrection: Codable, Identifiable, Equatable {
 
 /// What one `LearnedStore.addTracked` changed, so exactly that — and nothing the user had before — can be taken back.
 struct LearnReceipt: Equatable {
-    /// The mapping that was added or seen again.
-    let correctionID: UUID
+    /// The mapping that was added or seen again; nil when only a new word was learned (`addNewWordsTracked`).
+    let correctionID: UUID?
     /// New with this edit (taking it back removes it) rather than an old one seen once more (one less seen).
     let createdCorrection: Bool
     /// The spelling went into the user's words with this edit; nil when it was already there.
@@ -83,6 +83,10 @@ enum LearnedStore {
         let heardTrimmed = normalizePhrase(heard)
         let intendedTrimmed = cleanedTerm(intended)
         if isRewording(heard: heardTrimmed, intended: intendedTrimmed) { return nil }
+        // What was "heard" is already one of the user's own words, spelled their way: that's not a mishearing being
+        // fixed. (2026-10-14: another dictation app pasted its own, worse version next to Murmur's, and "Manrope" →
+        // "Mamloop" was learned as if the user had made it.)
+        if personalTermKeys().contains(heardTrimmed.lowercased()) { return nil }
         guard isUsefulMapping(heard: heardTrimmed, intended: intendedTrimmed) else {
             // Nothing to swap, but a name the user wrote is worth knowing — a name, not any word (`isUnusual`).
             if WhisperPrompt.isUnusual(intendedTrimmed) { addTerm(intendedTrimmed) }
@@ -134,7 +138,7 @@ enum LearnedStore {
     }
 
     static func take(back receipt: LearnReceipt, from learned: inout LearnedData) {
-        if let index = learned.corrections.firstIndex(where: { $0.id == receipt.correctionID }) {
+        if let id = receipt.correctionID, let index = learned.corrections.firstIndex(where: { $0.id == id }) {
             if receipt.createdCorrection {
                 learned.corrections.remove(at: index)
             } else {
@@ -181,12 +185,92 @@ enum LearnedStore {
         }
     }
 
+    /// Unusual words the user typed in that the dictation didn't have — "agentic" where the recogniser wrote
+    /// "page-empty built in". Such a swap is never stored as a mapping (nothing alike: `minimumLearnedSimilarity`), but
+    /// the word itself is worth knowing, so the recogniser is told about it next time. Letters only (no numbers, no
+    /// paths), at least four, not a common English word (`CommonWords`), not already one of the user's words.
+    static func newUnusualWords(original: String, corrected: String, known terms: [String],
+                                isKnownWord: (String) -> Bool = HarperChecker.isKnownEnglishWord,
+                                isCommon: (String) -> Bool = CommonWords.isCommon) -> [String] {
+        let have = Set(terms.map { $0.lowercased() })
+        var out: [String] = []
+        // Only words that took the place of others — never text added before or after the dictation, which may be
+        // anything (another app's paste, a sentence typed on).
+        for run in substitutions(original: original, corrected: corrected) {
+            for raw in run.added {
+                let word = raw.trimmingCharacters(in: .punctuationCharacters)
+                let letters = word.filter(\.isLetter)
+                guard letters.count >= 4, word.allSatisfy({ $0.isLetter || $0 == "-" || $0 == "'" || $0 == "’" }),
+                      // Unknown to the dictionary, or known but rare ("agentic"): either way worth telling the recogniser.
+                      !(isKnownWord(letters.lowercased()) && isCommon(letters.lowercased())),
+                      !have.contains(word.lowercased()),
+                      !out.contains(where: { $0.lowercased() == word.lowercased() }) else { continue }
+                out.append(word)
+            }
+        }
+        return Array(out.prefix(3))
+    }
+
+    /// The runs of words replaced by other words, in order (an insertion or a deletion alone is not one).
+    static func substitutions(original: String, corrected: String) -> [(removed: [String], added: [String])] {
+        let a = tokenize(original), b = tokenize(corrected)
+        guard !a.isEmpty, !b.isEmpty else { return [] }
+        var lcs = [[Int]](repeating: [Int](repeating: 0, count: b.count + 1), count: a.count + 1)
+        for i in stride(from: a.count - 1, through: 0, by: -1) {
+            for j in stride(from: b.count - 1, through: 0, by: -1) {
+                lcs[i][j] = a[i].key == b[j].key ? lcs[i + 1][j + 1] + 1 : max(lcs[i + 1][j], lcs[i][j + 1])
+            }
+        }
+        var runs: [(removed: [String], added: [String])] = []
+        var i = 0, j = 0
+        var removed: [String] = [], added: [String] = []
+        func flush() {
+            if !removed.isEmpty, !added.isEmpty { runs.append((removed, added)) }
+            removed = []
+            added = []
+        }
+        while i < a.count || j < b.count {
+            if i < a.count, j < b.count, a[i].key == b[j].key {
+                flush()
+                i += 1
+                j += 1
+            } else if j < b.count, i == a.count || lcs[i][j + 1] >= lcs[i + 1][j] {
+                // Words after the dictation's last word are text added on, never a substitution.
+                if i == a.count { flush(); j += 1; continue }
+                added.append(b[j].raw)
+                j += 1
+            } else {
+                removed.append(a[i].raw)
+                i += 1
+            }
+        }
+        flush()
+        return runs
+    }
+
+    /// Saves those words as the user's own (no mapping), saying what was added so the card's Undo can remove it.
+    /// `alsoIn`: a second reading of the field the word must be in too (so a word caught half-typed isn't learned).
+    static func addNewWordsTracked(original: String, corrected: String, alsoIn: String? = nil) -> [LearnedNotice] {
+        var learned = load()
+        let words = newUnusualWords(original: original, corrected: corrected, known: learned.terms)
+            .filter { word in alsoIn.map { $0.contains(word) } ?? true }
+        guard !words.isEmpty else { return [] }
+        let notices = words.map { word -> LearnedNotice in
+            appendTerm(word, to: &learned)
+            return LearnedNotice(heard: "", intended: word,
+                                 receipt: LearnReceipt(correctionID: nil, createdCorrection: false, termAdded: word))
+        }
+        save(learned)
+        return notices
+    }
+
     /// `learn`, with what each correction changed — so the "Saved … Undo" card can take it back.
     static func learnTracked(original: String, corrected: String) -> [LearnedNotice] {
-        extractCorrections(original: original, corrected: corrected).compactMap { pair in
+        let swaps = extractCorrections(original: original, corrected: corrected).compactMap { pair in
             addTracked(heard: pair.heard, intended: pair.intended)
                 .map { LearnedNotice(heard: pair.heard, intended: pair.intended, receipt: $0) }
         }
+        return swaps + addNewWordsTracked(original: original, corrected: corrected)
     }
 
     /// Learns from a user-corrected transcript: extracts word-level
@@ -259,10 +343,7 @@ enum LearnedStore {
             // wrote "Whisperflow" when it was taught and "Whisper Flow" today. Built-in ones stay exact, as tuned.
             let pattern = isPersonal ? flexiblePattern(for: heard)
                 : "(?i)\\b" + NSRegularExpression.escapedPattern(for: heard) + "\\b"
-            result = result.replacingOccurrences(
-                of: pattern,
-                with: NSRegularExpression.escapedTemplate(for: intended),
-                options: .regularExpression)
+            result = replaceKeepingSentenceCapital(in: result, pattern: pattern, with: intended)
         }
         result = DeveloperVocabulary.fuzzyCorrect(
             in: result, against: personalFuzzyTargets(from: personal))
@@ -277,6 +358,29 @@ enum LearnedStore {
     /// A whole-phrase, case-insensitive pattern for a mishearing that also matches its letters split or joined
     /// differently: "Whisperflow" matches "Whisper Flow" and "Whisper-flow", "revenue cut" matches "revenuecut".
     /// Only from 6 letters up — a short one like "KPA" or "IIS" stays exact, where a gap could land on real words.
+    /// Every match of `pattern` replaced by `intended` — with a capital first letter where the match began a sentence
+    /// ("Hey, agentic." → "Agentic.", not "agentic."). Elsewhere `intended` is written exactly as taught.
+    static func replaceKeepingSentenceCapital(in text: String, pattern: String, with intended: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let ns = text as NSString
+        var out = ""
+        var last = 0
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            out += ns.substring(with: NSRange(location: last, length: match.range.location - last))
+            let found = ns.substring(with: match.range)
+            let before = ns.substring(to: match.range.location).trimmingCharacters(in: .whitespaces)
+            let startsSentence = before.isEmpty || before.last.map { ".!?\n".contains($0) } == true
+            var replacement = intended
+            if startsSentence, found.first?.isUppercase == true, let first = replacement.first, first.isLowercase {
+                replacement = first.uppercased() + replacement.dropFirst()
+            }
+            out += replacement
+            last = NSMaxRange(match.range)
+        }
+        out += ns.substring(from: last)
+        return out
+    }
+
     static func flexiblePattern(for heard: String) -> String {
         let characters = Array(heard)
         guard characters.filter(\.isLetter).count >= 6 else {
@@ -285,7 +389,9 @@ enum LearnedStore {
         var pattern = ""
         for (index, character) in characters.enumerated() {
             if character == " " || character == "-" {
-                pattern += "[ -]?"
+                // Between the words of a phrase the recogniser may also have put a comma: "hey agentic" matches
+                // "Hey, agentic".
+                pattern += "(?:, ?|[ -])?"
                 continue
             }
             pattern += NSRegularExpression.escapedPattern(for: String(character))
@@ -407,6 +513,8 @@ enum LearnedStore {
             DeveloperVocabulary.terms.forEach(insert)
         }
         let learned = load()
+        // In the order they were learned. Newest-first was tried (2026-10-14) and cost 3.36% → 3.62% errors and 190 → 177
+        // names on the test recordings: the prompt's ~400 characters then held fewer of the long-standing names.
         learned.terms.forEach(insert)
         learned.corrections.map(\.intended).filter { WhisperPrompt.isUnusual($0) }.forEach(insert)
         TextFormatter.loadDictionary().values.forEach(insert)
@@ -710,6 +818,12 @@ enum LearnedStore {
         check(matches("Whisperflow", "I tested Whisper Flow today") && matches("Whisperflow", "a whisper-flow test"),
               "a taught mishearing still matches when split into two words")
         check(matches("revenue cut", "check revenuecut now"), "…or joined into one")
+        check(matches("hey agentic", "Hey, agentic."), "…or with a comma between the words")
+        check(replaceKeepingSentenceCapital(in: "Hey, agentic. Then hey agentic again.", pattern: flexiblePattern(for: "hey agentic"),
+                                            with: "agentic") == "Agentic. Then agentic again.",
+              "a fix that starts a sentence keeps its capital; mid-sentence it is written as taught")
+        check(replaceKeepingSentenceCapital(in: "Use Genentech here.", pattern: "(?i)\\bgenentech\\b", with: "agentic")
+              == "Use agentic here.", "a capital mid-sentence isn't carried over")
         check(!matches("Whisperflow", "whisper flowchart") && !matches("IIS", "and i is here"),
               "but never inside a longer word, or across a gap in a short one")
         let everyday: (String) -> Bool = {
@@ -729,6 +843,28 @@ enum LearnedStore {
               == "Planrify and RevenueCat on iOS", "names come out spelled the user's way")
         check(enforceCasing(in: "a murmur in the room, Gemini", terms: ["Murmur", "gemini", "dmg"], isKnownWord: known)
               == "a murmur in the room, Gemini", "everyday words and lowercase terms are left as they are")
+        let ordinary: (String) -> Bool = { ["this", "app", "for", "like", "more", "page", "empty", "built", "power", "the"].contains($0) }
+        let everydayWords: (String) -> Bool = { ordinary($0) }
+        check(newUnusualWords(original: "more like page-empty built in this power-up", corrected: "more like agentic for this app",
+                              known: [], isKnownWord: ordinary, isCommon: everydayWords) == ["agentic"]
+              && newUnusualWords(original: "more like page built in this power-up", corrected: "more like agentic for this app",
+                                 known: [], isKnownWord: { _ in true }, isCommon: { $0 != "agentic" }) == ["agentic"],
+              "a new word the user typed is found — unknown, or known but rare — and common ones are not")
+        check(newUnusualWords(original: "send it at 3pm", corrected: "send it at 4pm to /tmp/x", known: [], isKnownWord: ordinary,
+                              isCommon: everydayWords).isEmpty
+              && newUnusualWords(original: "use the app", corrected: "use Planrify", known: ["planrify"], isKnownWord: ordinary,
+                                 isCommon: everydayWords).isEmpty,
+              "…but never numbers, paths, or a word the user already has")
+        var words = LearnedData(corrections: [], terms: ["Murmur"])
+        let wordReceipt = LearnReceipt(correctionID: nil, createdCorrection: false, termAdded: "agentic")
+        appendTerm("agentic", to: &words)
+        take(back: wordReceipt, from: &words)
+        check(words.terms == ["Murmur"], "undo removes a new word learned on its own")
+        let murmurText = "The fonts are Manrope for the body. Please send the invoice to Planrify by Friday."
+        let otherAppAppended = murmurText + " The fonts are Mamloop for the body. Please send the invoice to Plunderfy by Friday."
+        check(newUnusualWords(original: murmurText, corrected: otherAppAppended, known: [], isKnownWord: ordinary,
+                              isCommon: everydayWords).isEmpty,
+              "another app's version pasted after the dictation teaches no new words")
         // Undo takes back exactly what one edit saved (pure: nothing here touches the user's own file).
         var data = LearnedData(corrections: [LearnedCorrection(heard: "Mormo", intended: "Murmur")], terms: ["Murmur"])
         let first = record(heard: "Plondrify", intended: "Planrify", in: &data)

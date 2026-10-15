@@ -166,11 +166,17 @@ enum EditLearner {
         dictationLog.notice("edit learning: stopped watching — \(reason, privacy: .public)")
         guard let steady = watched.steady else { return }
         // Only the corrections Murmur now makes by itself are announced (a heard everyday word only teaches the name).
-        let learned: [LearnedNotice] = agreedPairs(original: watched.inserted, steady: steady, latest: watched.latest)
+        var learned: [LearnedNotice] = agreedPairs(original: watched.inserted, steady: steady, latest: watched.latest)
             .compactMap { pair in
                 LearnedStore.addTracked(heard: pair.heard, intended: pair.intended)
                     .map { LearnedNotice(heard: pair.heard, intended: pair.intended, receipt: $0) }
             }
+        // A new word typed in where the dictation had something unlike it — kept only when both readings have it, so a
+        // half-typed word isn't learned, and only while most of the dictation is still there.
+        if stillHolds(watched.inserted, in: steady), !grewTooMuch(watched.inserted, steady) {
+            let fresh = LearnedStore.addNewWordsTracked(original: watched.inserted, corrected: steady, alsoIn: watched.latest)
+            learned += fresh.filter { new in !learned.contains { $0.intended.lowercased() == new.intended.lowercased() } }
+        }
         if let draft = watched.draft {
             // The words the field held at the end — the same region the corrections were read from.
             EditRecordStore.complete(draft, final: steady, reason: reason, learned: learned.count)
@@ -235,11 +241,18 @@ enum EditLearner {
         return !dictated.isEmpty && Double(dictated.filter(present.contains).count) / Double(dictated.count) >= 0.6
     }
 
+    /// The dictation's stretch of the field grew far beyond what a correction does — a second version pasted beside
+    /// it (another dictation app on the same key, 2026-10-14), or a long passage typed on. Nothing is learned from it.
+    static func grewTooMuch(_ dictation: String, _ region: String) -> Bool {
+        let before = words(dictation).count, after = words(region).count
+        return Double(after) > Double(before) * 1.6 + 8
+    }
+
     /// The corrections worth learning: substitutions (`LearnedStore.extractCorrections`) whose new side is a name or an
     /// unusual word, while most of the dictation is still there.
     static func pairs(original: String, edited: String,
                       isKnownWord: (String) -> Bool = HarperChecker.isKnownEnglishWord) -> [(heard: String, intended: String)] {
-        guard stillHolds(original, in: edited) else { return [] }
+        guard stillHolds(original, in: edited), !grewTooMuch(original, edited) else { return [] }
         return LearnedStore.extractCorrections(original: original, corrected: edited).filter { pair in
             WhisperPrompt.isWorthMentioning(pair.intended, isKnownWord: isKnownWord)
                 && !isKnownWord(pair.intended.lowercased().filter(\.isLetter))

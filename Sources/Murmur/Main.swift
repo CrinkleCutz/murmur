@@ -76,6 +76,9 @@ struct MurmurMain {
             case "--render-settings":
                 guard let path = arguments.next() else { usageAndExit() }
                 mode = .renderSettings(path)
+            case "--learn-check":
+                guard let original = arguments.next(), let edited = arguments.next() else { usageAndExit() }
+                mode = .learnCheck(original, edited)
             case "--duck-check":
                 mode = .duckCheck
             case "--mic-compare":
@@ -290,6 +293,7 @@ struct MurmurMain {
             let editRecordsPassed = EditRecordStore.runSelfTest()
             let dictionaryImportPassed = DictionaryImport.runSelfTest()
             let pasteLastPassed = PasteLastShortcut.runSelfTest()
+            let commonWordsPassed = CommonWords.runSelfTest()
             let screenNamesPassed = ScreenContext.runSelfTest()
             let transformGuardPassed = TransformGuard.runSelfTest()
             let destinationPassed = DestinationDetector.runSelfTest()
@@ -306,7 +310,7 @@ struct MurmurMain {
                  && profilesPassed && audioPassed && hallucinationPassed
                  && developerVocabPassed && transformsPassed && plausibilityPassed
                  && harperPassed && guardPassed && trimmerPassed && correctionsPassed && timesPassed && matchAppPassed && shortcutKeysPassed && healthPassed && pastePassed
-                 && secureInputPassed && styleGuardPassed && notchPassed && navBarPassed && licenseTokenPassed && licenseGatePassed && licenseStorePassed && updateSelectionPassed && licenseTilePassed && licensePreviewPassed && whisperPromptPassed && liveChunksPassed && microphonePassed && unsureWordsPassed && cursorPassed && editLearnerPassed && sentLearnerPassed && editRecordsPassed && dictionaryImportPassed && pasteLastPassed && screenNamesPassed && transformGuardPassed && destinationPassed && templateLayoutPassed && rewritePromptPassed && snippetsPassed && cleanupLanguagesPassed && spokenCommandsPassed && spokenCodePassed && projectNamesPassed && codeFieldsPassed && translatePassed ? 0 : 1)
+                 && secureInputPassed && styleGuardPassed && notchPassed && navBarPassed && licenseTokenPassed && licenseGatePassed && licenseStorePassed && updateSelectionPassed && licenseTilePassed && licensePreviewPassed && whisperPromptPassed && liveChunksPassed && microphonePassed && unsureWordsPassed && cursorPassed && editLearnerPassed && sentLearnerPassed && editRecordsPassed && dictionaryImportPassed && pasteLastPassed && commonWordsPassed && screenNamesPassed && transformGuardPassed && destinationPassed && templateLayoutPassed && rewritePromptPassed && snippetsPassed && cleanupLanguagesPassed && spokenCommandsPassed && spokenCodePassed && projectNamesPassed && codeFieldsPassed && translatePassed ? 0 : 1)
 
         case .pipelineBench(let path):
             // Recognizer decode + cleanup call, with and without starting the cleanup prompt's fixed prefix at the
@@ -1478,6 +1482,21 @@ struct MurmurMain {
                 exit(0)
             }
 
+        case .learnCheck(let original, let edited):
+            // What learning makes of one edit, step by step — nothing is saved.
+            let raw = LearnedStore.extractCorrections(original: original, corrected: edited)
+            print("differences found: \(raw.map { "\($0.heard) → \($0.intended)" })")
+            for pair in raw {
+                let worth = WhisperPrompt.isWorthMentioning(pair.intended, isKnownWord: HarperChecker.isKnownEnglishWord)
+                let known = HarperChecker.isKnownEnglishWord(pair.intended.lowercased().filter(\.isLetter))
+                let rewording = LearnedStore.isRewording(heard: pair.heard, intended: pair.intended)
+                print("  \(pair.heard) → \(pair.intended): name or unusual word \(worth), whole thing a known word \(known), "
+                      + "everyday-for-everyday \(rewording)")
+            }
+            print("kept by edit learning: \(EditLearner.pairs(original: original, edited: edited).map { "\($0.heard) → \($0.intended)" })")
+            print("new words it would learn: \(LearnedStore.newUnusualWords(original: original, corrected: edited, known: LearnedStore.biasTerms(includeDeveloperVocabulary: false)))")
+            exit(0)
+
         case .duckCheck:
             // What lowering other sound would do on this Mac now, then a real 2-second duck and restore.
             print(AudioDuck.describe())
@@ -1747,6 +1766,7 @@ struct MurmurMain {
         case renderShell(String)
         case editRecords
         case duckCheck
+        case learnCheck(String, String)
         case micCompare(Double, String)
         case renderToast(String)
         case renderSheets(String)

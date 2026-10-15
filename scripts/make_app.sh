@@ -48,6 +48,11 @@ if [ -d ".build/release/Murmur_Murmur.bundle/Fonts" ]; then
     mkdir -p "$APP/Contents/Resources/Fonts"
     cp .build/release/Murmur_Murmur.bundle/Fonts/*.ttf "$APP/Contents/Resources/Fonts/"
 fi
+# The common-words list (`CommonWords`), the same way.
+if [ -d ".build/release/Murmur_Murmur.bundle/Words" ]; then
+    mkdir -p "$APP/Contents/Resources/Words"
+    cp .build/release/Murmur_Murmur.bundle/Words/*.txt "$APP/Contents/Resources/Words/"
+fi
 
 # App icon (source: Resources/Murmur.svg — rerun scripts/make_icon.sh to
 # regenerate Resources/Murmur.icns after changing the SVG).

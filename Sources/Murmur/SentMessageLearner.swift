@@ -73,9 +73,13 @@ enum SentMessageLearner {
             guard let message = messages.first(where: { $0.date >= item.date && region(of: item.text, in: $0.text) != nil }),
                   let found = region(of: item.text, in: message.text) else { continue }
             pending.removeAll { $0.date == item.date && $0.text == item.text }
-            let notices: [LearnedNotice] = EditLearner.pairs(original: item.text, edited: found).compactMap { pair in
+            var notices: [LearnedNotice] = EditLearner.pairs(original: item.text, edited: found).compactMap { pair in
                 LearnedStore.addTracked(heard: pair.heard, intended: pair.intended)
                     .map { LearnedNotice(heard: pair.heard, intended: pair.intended, receipt: $0) }
+            }
+            if EditLearner.stillHolds(item.text, in: found), !EditLearner.grewTooMuch(item.text, found) {
+                notices += LearnedStore.addNewWordsTracked(original: item.text, corrected: found)
+                    .filter { new in !notices.contains { $0.intended.lowercased() == new.intended.lowercased() } }
             }
             dictationLog.notice("sent-message learning: found the message, learned \(notices.count)")
             if let draft = item.draft {

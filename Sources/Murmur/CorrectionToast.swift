@@ -28,7 +28,7 @@ final class CorrectionToastController {
             ? "Saved “\(first.intended)”"
             : "Saved “\(first.intended)” and \(notices.count - 1) more"
         model.detail = notices.count == 1
-            ? "Instead of “\(first.heard)”, from now on."
+            ? (first.heard.isEmpty ? "A new word Murmur will listen for." : "Instead of “\(first.heard)”, from now on.")
             : "From now on, instead of what was heard."
         model.undone = false
         model.progress = 1

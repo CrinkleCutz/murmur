@@ -48,6 +48,7 @@ let package = Package(
             path: "Sources/Murmur",
             resources: [
                 .copy("Resources/Fonts"),
+                .copy("Resources/Words"),
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         )

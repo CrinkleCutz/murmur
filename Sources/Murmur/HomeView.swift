@@ -148,8 +148,7 @@ struct HomePage: View {
             // beneath it.
             HStack(alignment: .center, spacing: 36) {
                 Text(Self.captureHeadline)
-                    .font(.manrope(33, .medium))
-                    .tracking(-0.66)
+                    .font(.fogtwo(36))
                     .lineSpacing(8)
                     .lineLimit(3)
                     .foregroundStyle(.white)
